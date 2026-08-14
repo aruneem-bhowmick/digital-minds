@@ -12,12 +12,15 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from huggingface_hub import hf_hub_download
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
+
+if TYPE_CHECKING:
+    import torch
 
 # Fixed corpus for REQ-1's reconstruction-quality check (validate_reconstruction).
 # Tokenizes to exactly 120 tokens under this model's tokenizer -- kept as one
