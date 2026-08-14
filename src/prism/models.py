@@ -132,8 +132,13 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
     acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
     reconstructed = loaded.sae.decode(loaded.sae.encode(acts))
 
-    residual_sum_sq = (acts - reconstructed).pow(2).sum()
     total_sum_sq = (acts - acts.mean(dim=0, keepdim=True)).pow(2).sum()
+    if total_sum_sq == 0:
+        raise ValueError(
+            f"activations have zero variance across {acts.shape[0]} token(s); "
+            "fraction_variance_explained is undefined for this input -- pass more or longer prompts"
+        )
+    residual_sum_sq = (acts - reconstructed).pow(2).sum()
     fraction_variance_explained = 1.0 - (residual_sum_sq / total_sum_sq).item()
 
     return {
