@@ -25,6 +25,10 @@ injection:
   layer: TODO  # REQ-10 / ADR-0009: UCARE compression-boundary layer, else the 2/3-depth fallback
   strengths: TODO  # REQ-5 / ADR-0003: working strength band from the calibration pilot
 
+features:
+  n_total: 40  # REQ-2 / SPRINT-PLAN.md §3.2: sample size within the 30-50 range the spec calls for
+  sample_seed: 0  # REQ-2: fixed seed for stratified_sample() reproducibility
+
 sampling:
   seeds: [0, 1, 2]  # REQ-6 / ADR-0008: multiple seeds per condition to estimate variance at temperature 1
 
