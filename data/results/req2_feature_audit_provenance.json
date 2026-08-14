@@ -1,0 +1,16 @@
+{
+  "model_name": "EleutherAI/pythia-70m-deduped",
+  "model_checkpoint_revision": "e93a9faa9c77e5d09219f6c868bfc7a1bd65593c",
+  "sae_checkpoint_repo": "ghidav/pythia-70m-deduped-sae",
+  "sae_checkpoint_revision": "473774a054588503a90844f1afdb7b8fbf5f32a0",
+  "sae_checkpoint_sha256": "fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f",
+  "hook_name": "blocks.4.hook_resid_pre",
+  "identifiability_source_csv": "C:\\Users\\arune\\research\\sae-bounding\\results\\per_feature\\pythia-70m-deduped-residual-layer-4.csv",
+  "git_commit": "bc5f2c3a1353bc62697befff1eb312b7b8d12762",
+  "timestamp": "2026-08-14T21:54:38.912224+00:00",
+  "corpus_dataset": "NeelNanda/pile-10k",
+  "corpus_revision": "127bfedcd5047750df5ccf3a12979a47bfa0bafa",
+  "corpus_n_documents": 500,
+  "corpus_max_tokens_per_document": 256,
+  "corpus_total_tokens": 111233
+}
