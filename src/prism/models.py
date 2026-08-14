@@ -111,3 +111,32 @@ def _verify_sha256(path: Path, expected: str) -> None:
             "the downloaded checkpoint does not match the one the identifiability audit scored"
         )
 
+
+def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dict[str, Any]:
+    """Encode/decode real residual-stream activations through the SAE and report
+    fraction of variance explained, per REQ-1's definition of done: reconstruction
+    quality is reported, not assumed, regardless of which ADR-0002 branch was taken.
+    """
+    import torch
+
+    activations: list[torch.Tensor] = []
+
+    def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
+        activations.append(act.detach())
+        return act
+
+    for prompt in prompts:
+        tokens = loaded.model.to_tokens(prompt)
+        loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
+
+    acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
+    reconstructed = loaded.sae.decode(loaded.sae.encode(acts))
+
+    residual_sum_sq = (acts - reconstructed).pow(2).sum()
+    total_sum_sq = (acts - acts.mean(dim=0, keepdim=True)).pow(2).sum()
+    fraction_variance_explained = 1.0 - (residual_sum_sq / total_sum_sq).item()
+
+    return {
+        "n_tokens": int(acts.shape[0]),
+        "fraction_variance_explained": fraction_variance_explained,
+    }
