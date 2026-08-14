@@ -52,10 +52,10 @@ def build_feature_audit_table(
     logged config alone per CLAUDE.md's reproducibility rule.
     """
     identifiability = pd.read_csv(identifiability_csv)
-    if list(identifiability.columns) != ["feature_id", "identifiability_score"]:
+    missing_columns = {"feature_id", "identifiability_score"} - set(identifiability.columns)
+    if missing_columns:
         raise ValueError(
-            f"{identifiability_csv} does not have the expected "
-            "feature_id, identifiability_score schema"
+            f"{identifiability_csv} is missing required column(s): {sorted(missing_columns)}"
         )
 
     loaded = load_model_and_sae(config, device=device)
@@ -65,6 +65,13 @@ def build_feature_audit_table(
             f"identifiability table has {len(identifiability)} rows but the "
             f"loaded SAE has {n_features} features -- these must come from "
             "the same checkpoint"
+        )
+    if set(identifiability["feature_id"]) != set(range(n_features)):
+        raise ValueError(
+            f"{identifiability_csv}'s feature_id values are not exactly "
+            f"0..{n_features - 1} -- the join below assigns decoder_norm and "
+            "activation_frequency by position, which requires an exact, "
+            "contiguous match to the loaded SAE's own feature indexing"
         )
 
     token_batches, corpus_provenance = _load_corpus(
@@ -85,6 +92,7 @@ def build_feature_audit_table(
         "sae_checkpoint_repo": config["sae"]["checkpoint_repo"],
         "sae_checkpoint_revision": config["sae"]["checkpoint_revision"],
         "sae_checkpoint_sha256": config["sae"]["checkpoint_sha256"],
+        "hook_name": config["sae"]["hook_name"],
         "identifiability_source_csv": str(identifiability_csv),
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
