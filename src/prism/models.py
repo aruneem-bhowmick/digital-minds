@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from huggingface_hub import hf_hub_download
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
@@ -168,6 +169,51 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
         "n_tokens": int(acts.shape[0]),
         "fraction_variance_explained": fraction_variance_explained,
     }
+
+
+def measure_activation_frequencies(
+    loaded: LoadedPrismModel, token_batches: list["torch.Tensor"]
+) -> np.ndarray:
+    """Return each SAE feature's activation rate over pre-tokenized text (REQ-2 / ADR-0011).
+
+    A feature "activates" on a token when its encoded value is nonzero (the
+    encoder's ReLU floor). Returns one rate per decoder atom, in the same
+    row order as ``loaded.sae.W_dec``, so it lines up with ``decoder_norms()``
+    and with the per-feature identifiability table without a remapping step.
+    ``token_batches`` is pre-tokenized (and, for a large corpus, pre-truncated)
+    by the caller -- this function only runs the forward passes and counts.
+    """
+    import torch
+
+    activations: list[torch.Tensor] = []
+
+    def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
+        activations.append(act.detach())
+        return act
+
+    for tokens in token_batches:
+        loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
+
+    acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
+    with torch.no_grad():
+        fires = (loaded.sae.encode(acts) != 0).float()
+        rates = fires.mean(dim=0)
+    return rates.numpy()
+
+
+def decoder_norms(loaded: LoadedPrismModel) -> np.ndarray:
+    """Return each SAE feature's raw, un-normalized decoder-vector norm.
+
+    ADR-0010 records that this checkpoint's decoder atoms are not
+    unit-normalized (``normalize_sae_decoder: false``), so this varies
+    meaningfully across features and needs no separate measurement beyond
+    reading ``W_dec`` directly.
+    """
+    import torch
+
+    with torch.no_grad():
+        norms = loaded.sae.W_dec.norm(dim=1)
+    return norms.numpy()
 
 
 def save_reconstruction_result(
