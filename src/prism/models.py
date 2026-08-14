@@ -215,11 +215,11 @@ def measure_activation_frequencies(
 
     for start in range(0, len(token_batches), chunk_size):
         activations: list[torch.Tensor] = []
-        for tokens in token_batches[start : start + chunk_size]:
-            loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
-
-        acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
         with torch.no_grad():
+            for tokens in token_batches[start : start + chunk_size]:
+                loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
+
+            acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
             fires = (loaded.sae.encode(acts) != 0).float()
         chunk_counts = fires.sum(dim=0).cpu()
         nonzero_counts = chunk_counts if nonzero_counts is None else nonzero_counts + chunk_counts
