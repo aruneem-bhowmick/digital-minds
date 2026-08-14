@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from prism.models import _validate_pairing, _verify_sha256, load_model_and_sae
+from prism.models import (
+    RECONSTRUCTION_VALIDATION_PROMPTS,
+    _validate_pairing,
+    _verify_sha256,
+    load_model_and_sae,
+    save_reconstruction_result,
+    validate_reconstruction,
+)
 
 CONFIG_PATH = "configs/experiment.yaml"
 
@@ -96,6 +103,11 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
     Not a mock: this is the actual model and the actual audited SAE, per
     CLAUDE.md's rule against faking pipeline stages. Slow and network-bound,
     which is why it's marked separately from the fast unit tests above.
+
+    Also exercises validate_reconstruction() against the fixed corpus REQ-1's
+    definition of done requires reconstruction quality for, and persists the
+    result so it's a traceable artifact (git commit, timestamp, checkpoint
+    identity) rather than only prose in a commit message.
     """
     with open(CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -104,3 +116,13 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
 
     assert loaded.sae.cfg.d_in == loaded.model.cfg.d_model
     assert loaded.hook_name in loaded.model.hook_dict
+
+    result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
+
+    assert result["n_tokens"] == 120
+    # Measured 0.9808 on this checkpoint; floor set below that with margin for
+    # tokenizer/library version drift, not tuned to just barely pass.
+    assert result["fraction_variance_explained"] >= 0.9
+
+    output_path = save_reconstruction_result(config, result)
+    assert output_path.exists()
