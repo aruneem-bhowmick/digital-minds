@@ -187,6 +187,24 @@ This is tracked as a REQ-2 blocking dependency (issue #7), not implemented as pa
 
 ---
 
+## ADR-0012: Dependency pins corrected against real execution, not just resolution
+
+**Context:** `pyproject.toml`'s original pins (`torch==2.13.0`, plus whatever `transformer-lens==3.7.1`'s unbounded `transformers>=5.9.0` constraint happened to resolve to) were verified only via `uv pip install --dry-run` during scaffolding, a dependency-resolution consistency check, not an actual run. Executing REQ-1 for real surfaced three genuine breaks, caught by code review on REQ-1's pull request rather than documented at the time.
+
+**Decision:** Pin to versions confirmed to load and run correctly, not merely to resolve:
+
+- `torch==2.13.0` fails `WinError 1114` (native DLL initialization failure) loading `c10.dll` on the machine this project is developed on, reproduced identically across two independent Python interpreters and several environment-variable workarounds. `torch==2.6.0` loads cleanly and was used for every real execution in this project so far.
+- `sentencepiece==0.2.2` segfaults on a bare `import sentencepiece`, independent of torch or transformer-lens entirely; a clean reinstall didn't change the outcome, ruling out a corrupted download. `sentencepiece==0.2.0` doesn't segfault, and is now pinned explicitly rather than left as an unpinned transitive dependency.
+- `transformer-lens==3.7.1` declares `transformers>=5.9.0` with no upper bound, which resolved to `5.15.0`. That version renamed GPT-NeoX's output head (`embed_out` to `lm_head`), which transformer-lens's `convert_neox_weights` doesn't handle, breaking `HookedTransformer.from_pretrained` for Pythia entirely. Pinned to `5.9.0`, transformer-lens's own declared floor, which still has the old attribute name.
+
+None of these are portability guarantees for every machine and accelerator; they are the versions verified to work on the machine this project's real runs have used so far. If a future run on different hardware needs a different pin, that's a new decision to document, not a silent swap.
+
+**Alternatives considered:** Leaving the original pins and working around the failures per-machine (rejected: the whole point of pinning versions in `pyproject.toml` is a run any collaborator can reproduce, and an unpinned or broken-pin dependency defeats that). Pinning to the newest version that happens to work rather than transformer-lens's declared floor for `transformers` (rejected for that specific pin: the declared floor is the version the library's own maintainers verified against, a narrower and more defensible choice than picking an arbitrary newer point in an unbounded range).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
