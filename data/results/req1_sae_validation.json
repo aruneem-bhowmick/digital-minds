@@ -1,0 +1,12 @@
+{
+  "model_name": "EleutherAI/pythia-70m-deduped",
+  "model_checkpoint_revision": "e93a9faa9c77e5d09219f6c868bfc7a1bd65593c",
+  "sae_checkpoint_repo": "ghidav/pythia-70m-deduped-sae",
+  "sae_checkpoint_revision": "473774a054588503a90844f1afdb7b8fbf5f32a0",
+  "sae_checkpoint_sha256": "fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f",
+  "hook_name": "blocks.4.hook_resid_pre",
+  "git_commit": "a2cb36ad92ef1d1e5c07f8740548dff912d8f212",
+  "timestamp": "2026-08-14T20:45:53.277435+00:00",
+  "n_tokens": 120,
+  "fraction_variance_explained": 0.9808104578405619
+}

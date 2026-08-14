@@ -151,6 +151,60 @@ prism/
 
 ---
 
+## ADR-0010: REQ-1 resolution — existing SAE, corrected base model
+
+**Context:** ADR-0002 left the SAE dependency "accepted, pending REQ-1 resolution." REQ-1's investigation checked `data/audit/` (empty in this repo) and the separate project that actually produces the identifiability audit (`sae-bounding`), against SAELens's registry.
+
+**Decision:** A residual-stream SAE for Pythia-70m-deduped exists and is the exact dictionary `sae-bounding` already scored — Hugging Face `ghidav/pythia-70m-deduped-sae`, path `test/blocks.4.hook_resid_pre/`, source revision `473774a054588503a90844f1afdb7b8fbf5f32a0`, SHA-256 `fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f`. Identity confirmed by matching checksum between the locally cached file, `sae-bounding`'s own manifest, and the Hugging Face LFS object. ADR-0002's first branch applies: load via SAELens where the format allows, minimal loader otherwise. No training fallback.
+
+This resolves against `EleutherAI/pythia-70m-deduped`, not the plain `EleutherAI/pythia-70m` `configs/experiment.yaml` named prior to this ADR — the SAE's own training config pins the deduped checkpoint explicitly. `configs/experiment.yaml` is corrected as part of REQ-1 to match.
+
+The checkpoint's training config also records `sae_lens_version: 2.1.3`, four major versions behind this project's pinned `sae-lens==6.49.1`, and `normalize_sae_decoder: false` — the decoder atoms are not unit-normalized in the saved weights, which is why ADR-0003's injection-time normalization step is necessary rather than redundant.
+
+Code review on REQ-1's pull request caught that only the SAE half of the pairing was pinned to a specific commit; `configs/experiment.yaml`'s `model:` block loaded `EleutherAI/pythia-70m-deduped` from whatever `main` currently resolves to. `HookedTransformer.from_pretrained` forwards a `revision` kwarg straight through to `AutoConfig.from_pretrained` and `AutoModelForCausalLM.from_pretrained`, so the same pinning mechanism already used for the SAE applies here too. `configs/experiment.yaml` now records `model.checkpoint_revision: e93a9faa9c77e5d09219f6c868bfc7a1bd65593c` (the repository's current commit, unchanged since 2023-07-09), and `load_model_and_sae()` passes it as `revision=` to `from_pretrained`.
+
+**Alternatives considered:** None — this is a resolution of an already-accepted contingent decision, not a new choice between options.
+
+**Status:** Accepted.
+
+---
+
+## ADR-0011: Audit data provenance — features.csv has two sources
+
+**Context:** REQ-1's investigation surfaced a gap ADR-0005 didn't anticipate. `sae-bounding`'s identifiability audit computes frame-theoretic statistics (mutual coherence, Welch bound, coherence gap, cumulative coherence, RIP) per *dictionary* — one row per SAE checkpoint. REQ-2's stratified sampling and ADR-0005's `data/audit/features.csv` schema both need a score per *feature*. That doesn't exist yet, and neither does per-feature activation frequency, which `sae-bounding` has no way to produce since it never loads a base model.
+
+**Decision:** `data/audit/features.csv` is assembled from two sources, not pulled wholesale from one existing artifact as ADR-0005 implied:
+1. **Per-feature identifiability score** — produced by extending `sae-bounding` with a per-atom coherence function (the row-wise max of the Gram matrix `mutual_coherence()` already computes, retained instead of discarded after the global-max reduction). Stays in `sae-bounding`; this project still treats it as read-only input, consistent with ADR-0005's intent.
+2. **Per-feature activation frequency** — measured inside this project by running Pythia-70m-deduped and the SAE loaded via REQ-1's `load_model_and_sae()` over a text corpus, since that requires a loaded model and `sae-bounding` is decoder-matrix-only by design. This also resolves `sae-bounding`'s own `pending_measurement` gap on this checkpoint's operating L0, as a byproduct of counting per-feature firing rates.
+
+Decoder norm (the third covariate ADR-0005 lists) is a direct property of `W_dec` and needs no new measurement from either project.
+
+This is tracked as a REQ-2 blocking dependency (issue #7), not implemented as part of REQ-1.
+
+**Alternatives considered:** Computing the per-feature identifiability score inside this project instead of `sae-bounding` (rejected — duplicates geometry logic that already exists and is tested there; keeping the audit canonical in one place matches ADR-0005's separation of concerns). Treating the existing dictionary-level coherence number as a stand-in for every feature in that dictionary (rejected outright — that would erase the exact variation H1 is testing for).
+
+**Status:** Accepted.
+
+---
+
+## ADR-0012: Dependency pins corrected against real execution, not just resolution
+
+**Context:** `pyproject.toml`'s original pins (`torch==2.13.0`, plus whatever `transformer-lens==3.7.1`'s unbounded `transformers>=5.9.0` constraint happened to resolve to) were verified only via `uv pip install --dry-run` during scaffolding, a dependency-resolution consistency check, not an actual run. Executing REQ-1 for real surfaced three genuine breaks, caught by code review on REQ-1's pull request rather than documented at the time.
+
+**Decision:** Pin to versions confirmed to load and run correctly, not merely to resolve:
+
+- `torch==2.13.0` fails `WinError 1114` (native DLL initialization failure) loading `c10.dll` on the machine this project is developed on, reproduced identically across two independent Python interpreters and several environment-variable workarounds. `torch==2.6.0` loads cleanly and was used for every real execution in this project so far.
+- `sentencepiece==0.2.2` segfaults on a bare `import sentencepiece`, independent of torch or transformer-lens entirely; a clean reinstall didn't change the outcome, ruling out a corrupted download. `sentencepiece==0.2.0` doesn't segfault, and is now pinned explicitly rather than left as an unpinned transitive dependency.
+- `transformer-lens==3.7.1` declares `transformers>=5.9.0` with no upper bound, which resolved to `5.15.0`. That version renamed GPT-NeoX's output head (`embed_out` to `lm_head`), which transformer-lens's `convert_neox_weights` doesn't handle, breaking `HookedTransformer.from_pretrained` for Pythia entirely. Pinned to `5.9.0`, transformer-lens's own declared floor, which still has the old attribute name.
+
+None of these are portability guarantees for every machine and accelerator; they are the versions verified to work on the machine this project's real runs have used so far. If a future run on different hardware needs a different pin, that's a new decision to document, not a silent swap.
+
+**Alternatives considered:** Leaving the original pins and working around the failures per-machine (rejected: the whole point of pinning versions in `pyproject.toml` is a run any collaborator can reproduce, and an unpinned or broken-pin dependency defeats that). Pinning to the newest version that happens to work rather than transformer-lens's declared floor for `transformers` (rejected for that specific pin: the declared floor is the version the library's own maintainers verified against, a narrower and more defensible choice than picking an arbitrary newer point in an unbounded range).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
