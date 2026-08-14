@@ -27,6 +27,10 @@ from datasets import load_dataset
 
 from prism.models import decoder_norms, load_model_and_sae, measure_activation_frequencies
 
+# Anchors the git_commit provenance lookup to this repository regardless of
+# the caller's own working directory (src/prism/audit_build.py -> src/prism -> src -> repo root).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # ADR-0013: NeelNanda/pile-10k, a 10,000-document sample of the Pile, which
 # is Pythia's own training corpus. Pinned to a specific dataset revision, not
 # a mutable branch ref, per CLAUDE.md's reproducibility rule.
@@ -66,6 +70,16 @@ def build_feature_audit_table(
     record identifies what was actually read, not just where a local
     (and typically machine-specific) copy of it happened to sit on disk.
     """
+    if len(identifiability_source_commit) != 40 or any(
+        char not in "0123456789abcdef" for char in identifiability_source_commit.lower()
+    ):
+        raise ValueError(
+            f"identifiability_source_commit {identifiability_source_commit!r} is not a "
+            "40-character git commit SHA -- this only checks the value is well-formed, "
+            "not that it's the actual commit that produced identifiability_csv (issue #17, "
+            "blocked on sae-bounding PR #6 merging before that can be verified)"
+        )
+
     identifiability = pd.read_csv(identifiability_csv)
     missing_columns = {"feature_id", "identifiability_score"} - set(identifiability.columns)
     if missing_columns:
@@ -111,7 +125,9 @@ def build_feature_audit_table(
         "identifiability_source_repo": identifiability_source_repo,
         "identifiability_source_commit": identifiability_source_commit,
         "identifiability_source_sha256": _sha256(identifiability_csv),
-        "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "git_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, cwd=_REPO_ROOT
+        ).strip(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **corpus_provenance,
     }
@@ -172,6 +188,8 @@ def main() -> None:
     parser.add_argument(
         "--max-tokens-per-document", type=int, default=DEFAULT_MAX_TOKENS_PER_DOCUMENT
     )
+    parser.add_argument("--corpus-dataset", default=DEFAULT_CORPUS_DATASET)
+    parser.add_argument("--corpus-revision", default=DEFAULT_CORPUS_REVISION)
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
@@ -184,6 +202,8 @@ def main() -> None:
         identifiability_source_repo=args.identifiability_source_repo,
         n_documents=args.n_documents,
         max_tokens_per_document=args.max_tokens_per_document,
+        corpus_dataset=args.corpus_dataset,
+        corpus_revision=args.corpus_revision,
     )
 
     output_path = Path(args.output)
