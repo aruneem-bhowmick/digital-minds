@@ -198,7 +198,7 @@ def measure_activation_frequencies(
     with torch.no_grad():
         fires = (loaded.sae.encode(acts) != 0).float()
         rates = fires.mean(dim=0)
-    return rates.numpy()
+    return rates.cpu().numpy()
 
 
 def decoder_norms(loaded: LoadedPrismModel) -> np.ndarray:
@@ -213,7 +213,7 @@ def decoder_norms(loaded: LoadedPrismModel) -> np.ndarray:
 
     with torch.no_grad():
         norms = loaded.sae.W_dec.norm(dim=1)
-    return norms.numpy()
+    return norms.cpu().numpy()
 
 
 def save_reconstruction_result(
