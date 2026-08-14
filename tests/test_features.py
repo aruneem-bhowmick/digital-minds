@@ -13,6 +13,7 @@ from prism.features import (
     _assign_tertiles,
     _balanced_within_stratum,
     _round_robin_allocation,
+    _shared_bin_targets,
     _tertile_counts,
     check_covariate_balance,
     load_feature_audit,
@@ -26,18 +27,34 @@ def _audit_csv(tmp_path: Path, rows: pd.DataFrame) -> Path:
     return path
 
 
-def _synthetic_population(n: int = 30, seed: int = 0) -> pd.DataFrame:
-    """30 features with an even score spread and covariates independent of
-    identifiability, so every tertile spans the full norm/frequency range
-    and balancing has something real to do.
+def _synthetic_population(n: int = 108, seed: int = 0) -> pd.DataFrame:
+    """A population where every identifiability tertile has, by
+    construction, exactly the same number of features in every one of the
+    nine decoder_norm x activation_frequency covariate bins.
+
+    n must be divisible by 27 (3 tertiles x 9 bins) for the split to come
+    out even. A cyclic bin assignment guarantees this deterministically --
+    a random permutation at a small population size can leave a tertile
+    with zero features in some bin by pure chance, which is a real
+    limitation of the population, not a bug in stratified_sample()'s
+    shared cross-tertile target, but not what most tests here want to
+    exercise. seed is accepted for interface symmetry with other
+    populations in this module but doesn't affect this one's construction.
     """
-    rng = np.random.default_rng(seed)
+    del seed
+    if n % 27 != 0:
+        raise ValueError("n must be divisible by 27 for exact tertile x bin coverage")
+    rng = np.random.default_rng(0)
+    cycle = np.arange(n) % 9
+    norm_third = cycle // 3
+    freq_third = cycle % 3
+    jitter = rng.uniform(0, 1, size=n)
     return pd.DataFrame(
         {
             "feature_id": np.arange(n),
-            "identifiability_score": np.linspace(0.1, 0.9, n),
-            "decoder_norm": rng.permutation(np.linspace(0.05, 2.0, n)),
-            "activation_frequency": rng.permutation(np.linspace(0.0001, 0.01, n)),
+            "identifiability_score": np.linspace(0.01, 0.99, n),  # strictly increasing, in [0, 1]
+            "decoder_norm": norm_third + jitter,  # non-negative
+            "activation_frequency": (freq_third + jitter) * 0.01,  # in [0, 1]
         }
     )
 
@@ -50,7 +67,7 @@ def test_load_feature_audit_loads_a_valid_csv(tmp_path: Path) -> None:
 
     df = load_feature_audit(str(path))
 
-    assert list(df["feature_id"]) == list(range(30))
+    assert list(df["feature_id"]) == list(range(108))
     assert set(REQUIRED_COLUMNS) <= set(df.columns)
 
 
@@ -147,26 +164,64 @@ def test_round_robin_allocation_respects_bin_capacity() -> None:
     assert sum(allocation.values()) == 4
 
 
-def test_balanced_within_stratum_draws_from_every_available_bin() -> None:
+def test_shared_bin_targets_splits_evenly() -> None:
+    rng = np.random.default_rng(0)
+
+    target = _shared_bin_targets(["a", "b", "c"], 6, rng)
+
+    assert target == {"a": 2, "b": 2, "c": 2}
+
+
+def test_shared_bin_targets_is_the_same_formula_for_equal_counts() -> None:
+    # Two tertiles asking for the same count get the same target composition
+    # -- the whole point of a "shared" target, not each tertile improvising
+    # its own based on local availability.
+    bins = ["a", "b", "c"]
+
+    low_target = _shared_bin_targets(bins, 6, np.random.default_rng(0))
+    high_target = _shared_bin_targets(bins, 6, np.random.default_rng(0))
+
+    assert low_target == high_target
+
+
+def test_balanced_within_stratum_draws_from_every_targeted_bin() -> None:
     stratum = pd.DataFrame(
         {
             "feature_id": range(9),
             "covariate_bin": ["low_low"] * 3 + ["medium_medium"] * 3 + ["high_high"] * 3,
         }
     )
+    target = {"low_low": 1, "medium_medium": 1, "high_high": 1}
     rng = np.random.default_rng(0)
 
-    selected = _balanced_within_stratum(stratum, count=3, rng=rng)
+    selected = _balanced_within_stratum(stratum, target, rng, tertile="low")
 
     assert len(selected) == 3
     assert set(selected["covariate_bin"]) == {"low_low", "medium_medium", "high_high"}
+
+
+def test_balanced_within_stratum_raises_when_a_bin_cannot_meet_the_target() -> None:
+    # Only one "low_low" feature available in this tertile, but the shared
+    # target asks for two -- must fail clearly, not silently draw the
+    # shortfall from a different bin.
+    stratum = pd.DataFrame(
+        {
+            "feature_id": range(4),
+            "covariate_bin": ["low_low"] + ["medium_medium"] * 3,
+        }
+    )
+    target = {"low_low": 2, "medium_medium": 1, "high_high": 0}
+    rng = np.random.default_rng(0)
+
+    with pytest.raises(ValueError, match="fewer than the 2 needed"):
+        _balanced_within_stratum(stratum, target, rng, tertile="low")
 
 
 # --- stratified_sample ----------------------------------------------------
 
 
 def test_stratified_sample_returns_exactly_n_total_rows() -> None:
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     sample = stratified_sample(population, n_total=15, seed=0)
 
@@ -174,7 +229,7 @@ def test_stratified_sample_returns_exactly_n_total_rows() -> None:
 
 
 def test_stratified_sample_distributes_a_remainder_across_tertiles() -> None:
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     sample = stratified_sample(population, n_total=16, seed=0)
 
@@ -185,7 +240,7 @@ def test_stratified_sample_distributes_a_remainder_across_tertiles() -> None:
 
 
 def test_stratified_sample_is_reproducible_under_a_fixed_seed() -> None:
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     first = stratified_sample(population, n_total=15, seed=42)
     second = stratified_sample(population, n_total=15, seed=42)
@@ -194,7 +249,7 @@ def test_stratified_sample_is_reproducible_under_a_fixed_seed() -> None:
 
 
 def test_stratified_sample_records_tertile_provenance() -> None:
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     sample = stratified_sample(population, n_total=15, seed=0)
 
@@ -202,15 +257,53 @@ def test_stratified_sample_records_tertile_provenance() -> None:
     assert sample["identifiability_tertile"].notna().all()
 
 
+def test_stratified_sample_matches_covariate_bin_composition_across_tertiles() -> None:
+    # The point of a shared cross-tertile target: every tertile's sample
+    # ends up with the *same* per-bin composition, not just a similar one.
+    population = _synthetic_population()
+
+    sample = stratified_sample(population, n_total=45, seed=0)  # 15 per tertile
+
+    counts_by_tertile = (
+        sample.groupby(["identifiability_tertile", "covariate_bin"], observed=True)
+        .size()
+        .unstack(fill_value=0)
+    )
+    assert (counts_by_tertile.nunique() == 1).all()
+
+
+def test_stratified_sample_raises_clearly_when_covariates_correlate_with_identifiability() -> None:
+    # decoder_norm and activation_frequency are monotonic in identifiability
+    # score here, so every identifiability tertile's rows fall into exactly
+    # one covariate bin (its own diagonal). A shared target spanning
+    # multiple bins can't be met from a single-bin tertile -- this must
+    # fail loudly, not silently draw the shortfall from whatever bin the
+    # tertile actually has, which would erase the correlation instead of
+    # surfacing it.
+    n = 90
+    scores = np.linspace(0.01, 0.99, n)
+    population = pd.DataFrame(
+        {
+            "feature_id": np.arange(n),
+            "identifiability_score": scores,
+            "decoder_norm": scores * 2.0,
+            "activation_frequency": scores * 0.01,
+        }
+    )
+
+    with pytest.raises(ValueError, match="fewer than the .* needed to match the shared"):
+        stratified_sample(population, n_total=9, seed=0)
+
+
 def test_stratified_sample_rejects_a_tertile_too_small_to_satisfy_n_total() -> None:
-    population = _synthetic_population(n=30)  # 10 features per tertile
+    population = _synthetic_population(n=27)  # 9 features per tertile
 
     with pytest.raises(ValueError, match="fewer than"):
         stratified_sample(population, n_total=60, seed=0)  # asks for 20 per tertile
 
 
 def test_stratified_sample_rejects_non_positive_n_total() -> None:
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     with pytest.raises(ValueError, match="at least 3"):
         stratified_sample(population, n_total=0, seed=0)
@@ -220,7 +313,7 @@ def test_stratified_sample_rejects_n_total_too_small_for_three_tertiles() -> Non
     # n_total=1 or 2 gives at least one tertile a count of 0, which would
     # otherwise reach pd.concat([]) inside _balanced_within_stratum and
     # crash with a confusing pandas-internal error rather than a clear one.
-    population = _synthetic_population(n=30)
+    population = _synthetic_population()
 
     with pytest.raises(ValueError, match="at least 3"):
         stratified_sample(population, n_total=2, seed=0)
