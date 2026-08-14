@@ -18,6 +18,21 @@ from huggingface_hub import hf_hub_download
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
 
+# Fixed corpus for REQ-1's reconstruction-quality check (validate_reconstruction).
+# Tokenizes to exactly 120 tokens under this model's tokenizer -- kept as one
+# canonical list so the test and any future run reference the same corpus,
+# rather than each defining its own ad hoc prompts.
+RECONSTRUCTION_VALIDATION_PROMPTS = [
+    "The quick brown fox jumps over the lazy dog.",
+    "In 1969, astronauts landed on the surface of the Moon for the first time.",
+    "She opened the door and found a small, curious cat sitting on the mat.",
+    "The stock market fell sharply after the announcement of new tariffs.",
+    "Photosynthesis converts sunlight, water, and carbon dioxide into glucose and oxygen.",
+    "He picked up the phone, dialed the number, and waited for an answer.",
+    "The recipe calls for two cups of flour, a teaspoon of salt, and three eggs.",
+    "Researchers published a new study on the effects of sleep deprivation on memory.",
+]
+
 
 @dataclass
 class LoadedPrismModel:
@@ -153,3 +168,39 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
         "n_tokens": int(acts.shape[0]),
         "fraction_variance_explained": fraction_variance_explained,
     }
+
+
+def save_reconstruction_result(
+    config: dict[str, Any],
+    result: dict[str, Any],
+    output_path: Path = Path("data/results/req1_sae_validation.json"),
+) -> Path:
+    """Persist a validate_reconstruction() result with full run provenance.
+
+    Per CLAUDE.md §2, a number that could end up in the report must be
+    reconstructable from its logged config alone. validate_reconstruction()
+    itself returns only n_tokens and fraction_variance_explained; this
+    attaches the model/SAE checkpoint identity, git commit, and timestamp
+    so the result isn't left as prose in a commit message.
+    """
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    record = {
+        "model_name": config["model"]["name"],
+        "model_checkpoint_revision": config["model"]["checkpoint_revision"],
+        "sae_checkpoint_repo": config["sae"]["checkpoint_repo"],
+        "sae_checkpoint_revision": config["sae"]["checkpoint_revision"],
+        "sae_checkpoint_sha256": config["sae"]["checkpoint_sha256"],
+        "hook_name": config["sae"]["hook_name"],
+        "git_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **result,
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return output_path
