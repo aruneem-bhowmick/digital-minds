@@ -6,6 +6,9 @@
 model:
   name: EleutherAI/pythia-70m-deduped  # SPEC §3.1 / ADR-0010: the SAE below was trained against the
                                         # deduped checkpoint specifically, not plain pythia-70m
+  checkpoint_revision: e93a9faa9c77e5d09219f6c868bfc7a1bd65593c  # pinned commit, not `main` -- same
+                                                                  # reproducibility rule CLAUDE.md §2
+                                                                  # requires for the SAE checkpoint below
 
 sae:
   # REQ-1 / ADR-0010: resolved to an existing SAE (ADR-0002's first branch) — the exact dictionary

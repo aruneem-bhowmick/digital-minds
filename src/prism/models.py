@@ -38,7 +38,8 @@ def load_model_and_sae(config: dict[str, Any], device: str = "cpu") -> LoadedPri
     should surface here, not several modules downstream during injection.
     """
     model_name = config["model"]["name"]
-    model = HookedTransformer.from_pretrained(model_name, device=device)
+    model_revision = config["model"]["checkpoint_revision"]
+    model = HookedTransformer.from_pretrained(model_name, revision=model_revision, device=device)
 
     sae_cfg = config["sae"]
     hook_name = sae_cfg["hook_name"]

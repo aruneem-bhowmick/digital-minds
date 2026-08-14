@@ -161,6 +161,8 @@ This resolves against `EleutherAI/pythia-70m-deduped`, not the plain `EleutherAI
 
 The checkpoint's training config also records `sae_lens_version: 2.1.3`, four major versions behind this project's pinned `sae-lens==6.49.1`, and `normalize_sae_decoder: false` — the decoder atoms are not unit-normalized in the saved weights, which is why ADR-0003's injection-time normalization step is necessary rather than redundant.
 
+Code review on REQ-1's pull request caught that only the SAE half of the pairing was pinned to a specific commit; `configs/experiment.yaml`'s `model:` block loaded `EleutherAI/pythia-70m-deduped` from whatever `main` currently resolves to. `HookedTransformer.from_pretrained` forwards a `revision` kwarg straight through to `AutoConfig.from_pretrained` and `AutoModelForCausalLM.from_pretrained`, so the same pinning mechanism already used for the SAE applies here too. `configs/experiment.yaml` now records `model.checkpoint_revision: e93a9faa9c77e5d09219f6c868bfc7a1bd65593c` (the repository's current commit, unchanged since 2023-07-09), and `load_model_and_sae()` passes it as `revision=` to `from_pretrained`.
+
 **Alternatives considered:** None — this is a resolution of an already-accepted contingent decision, not a new choice between options.
 
 **Status:** Accepted.
