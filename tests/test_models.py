@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 import yaml
 
 from prism.models import (
     RECONSTRUCTION_VALIDATION_PROMPTS,
+    LoadedPrismModel,
     _validate_pairing,
     _verify_sha256,
+    decoder_norms,
     load_model_and_sae,
+    measure_activation_frequencies,
     save_reconstruction_result,
     validate_reconstruction,
 )
@@ -126,3 +131,93 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
 
     output_path = save_reconstruction_result(config, result)
     assert output_path.exists()
+
+
+def _fake_loaded_for_frequency(activations: list, encoded_output: "torch.Tensor") -> LoadedPrismModel:
+    """A LoadedPrismModel whose model/sae are fakes, not real TransformerLens/SAELens
+    objects, matching this file's existing _fake_model/_fake_sae convention above.
+
+    ``encode()`` is called exactly once, on every batch's activations
+    concatenated together, so ``encoded_output`` must have one row per
+    token across all of ``activations`` -- not one value per call.
+    """
+    activation_iterator = iter(activations)
+
+    class _FakeModel:
+        def run_with_hooks(self, tokens: object, fwd_hooks: list) -> None:
+            del tokens
+            ((_hook_name, hook_fn),) = fwd_hooks
+            hook_fn(next(activation_iterator), None)
+
+    class _FakeSAE:
+        def encode(self, acts: "torch.Tensor") -> "torch.Tensor":
+            assert acts.shape[0] == encoded_output.shape[0]
+            return encoded_output
+
+    return LoadedPrismModel(model=_FakeModel(), sae=_FakeSAE(), hook_name="blocks.4.hook_resid_pre")
+
+
+def test_measure_activation_frequencies_counts_nonzero_encoded_activations() -> None:
+    # Two one-token batches, concatenated to two rows before the single
+    # encode() call; the fake SAE "encodes" that to a fixed 3-feature matrix
+    # so the expected per-feature rate can be computed by hand.
+    loaded = _fake_loaded_for_frequency(
+        activations=[torch.zeros(1, 1, 2), torch.zeros(1, 1, 2)],
+        encoded_output=torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 5.0]]),
+    )
+    token_batches = [torch.zeros(1, 1, dtype=torch.long), torch.zeros(1, 1, dtype=torch.long)]
+
+    rates = measure_activation_frequencies(loaded, token_batches)
+
+    np.testing.assert_allclose(rates, [0.5, 0.0, 0.5])
+
+
+def test_measure_activation_frequencies_handles_multi_token_batches() -> None:
+    loaded = _fake_loaded_for_frequency(
+        activations=[torch.zeros(1, 4, 2)],
+        encoded_output=torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 2.0]]),
+    )
+
+    rates = measure_activation_frequencies(loaded, [torch.zeros(1, 4, dtype=torch.long)])
+
+    np.testing.assert_allclose(rates, [0.5, 0.25])
+
+
+def test_decoder_norms_returns_row_wise_norm_of_w_dec() -> None:
+    w_dec = torch.tensor([[3.0, 4.0], [1.0, 0.0], [0.0, 0.0]])  # norms: 5.0, 1.0, 0.0
+
+    loaded = LoadedPrismModel(
+        model=SimpleNamespace(),
+        sae=SimpleNamespace(W_dec=w_dec),
+        hook_name="blocks.4.hook_resid_pre",
+    )
+
+    norms = decoder_norms(loaded)
+
+    np.testing.assert_allclose(norms, [5.0, 1.0, 0.0])
+
+
+@pytest.mark.integration
+def test_measure_activation_frequencies_and_decoder_norms_against_the_real_pair() -> None:
+    """Real model/SAE, small prompt set: shapes and value ranges only.
+
+    The full-corpus measurement (REQ-2's actual activation-frequency run)
+    is produced by prism.audit_build against a much larger pinned corpus;
+    this just confirms the mechanism works end to end against the real
+    checkpoint pair, the same way REQ-1's integration test does for
+    validate_reconstruction().
+    """
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    loaded = load_model_and_sae(config)
+    n_features = loaded.sae.W_dec.shape[0]
+    token_batches = [loaded.model.to_tokens(prompt) for prompt in RECONSTRUCTION_VALIDATION_PROMPTS]
+
+    rates = measure_activation_frequencies(loaded, token_batches)
+    norms = decoder_norms(loaded)
+
+    assert rates.shape == (n_features,)
+    assert norms.shape == (n_features,)
+    assert (rates >= 0).all() and (rates <= 1).all()
+    assert (norms >= 0).all()
