@@ -7,7 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "transformer-lens==3.7.1",
     "sae-lens==6.49.1",
-    "torch==2.13.0",
+    "torch==2.6.0",
+    "sentencepiece==0.2.0",
+    "transformers==5.9.0",
     "numpy==2.5.2",
     "pandas==3.0.5",
     "statsmodels==0.14.6",
@@ -27,3 +29,6 @@ packages = ["src/prism"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: exercises a real model/SAE load or network call, not a mock (slower; still run by default per CLAUDE.md's rule against faked pipeline stages)",
+]
