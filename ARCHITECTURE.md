@@ -205,6 +205,28 @@ None of these are portability guarantees for every machine and accelerator; they
 
 ---
 
+## ADR-0013: REQ-2 resolution — per-feature audit table assembled, corpus pinned
+
+**Context:** ADR-0011 left the per-feature identifiability score and activation-frequency measurement as a confirmed-but-unimplemented plan, tracked in issue #7. REQ-2 needed both before `stratified_sample()` had anything real to stratify on.
+
+**Decision:** Both pieces are implemented as ADR-0011 described, plus one addition ADR-0011 didn't specify: which text corpus activation frequency gets measured against.
+
+Per-feature identifiability now exists in `sae-bounding`, not this repo. `feature_coherence()` (`src/saeframe/frame/coherence.py`) exposes the row-wise max of the Gram matrix `mutual_coherence()` already builds, and `scripts/05_compute_feature_identifiability.py` runs it against one registered cohort at a time, loading only that cohort's checkpoint record rather than the whole registry (the registry has since grown Gemma Scope entries whose files aren't all cached locally, and a per-cohort script has no reason to require them). Run against `pythia-70m-deduped-residual-layer-4` (16,384 features, checksum `fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f`, the same checkpoint REQ-1 resolved to), it produced `results/per_feature/pythia-70m-deduped-residual-layer-4.csv`: exact scores (not sampled, unlike the existing dictionary-level `mutual_coherence` column in `audit_table.csv`, which was computed from a 1,024-column random subsample and is expected to disagree slightly with this exact computation's maximum). Committed on `sae-bounding` branch `req-2/per-feature-identifiability` at `105223f`, PR #6, not yet merged at the time this ADR was written.
+
+Activation frequency is measured inside this project, per ADR-0011, using two new `models.py` functions: `measure_activation_frequencies()` (runs pre-tokenized text through the loaded model and SAE, counts each feature's nonzero-encoding rate) and `decoder_norms()` (reads `W_dec`'s row-wise norm directly, no measurement needed, confirming ADR-0011's note that this covariate was always just sitting in the loaded weights).
+
+The corpus for that measurement is `NeelNanda/pile-10k` (Hugging Face dataset, revision `127bfedcd5047750df5ccf3a12979a47bfa0bafa`), a 10,000-document sample of the Pile. Pythia was trained on the Pile, so this keeps the frequency measurement on-distribution for the checkpoint being measured, and it's an established choice in the wider mechanistic-interpretability community for exactly this kind of small-model activation statistic, not a one-off pick. The actual run used the first 500 documents, each truncated to at most 256 tokens, for 111,233 tokens total, sized for a same-session turnaround (a few minutes on CPU) rather than exhaustive coverage — consistent with SPRINT-PLAN.md §3.2's "recomputed quickly if not already logged." 77 of 16,384 features never fired across that corpus; that's a real result of a finite sample against a large, long-tailed dictionary, not an error, and is left as a legitimate zero rather than smoothed.
+
+`src/prism/audit_build.py` is a new module ADR-0007's repository tree didn't list. It's a one-time data-preparation script, invoked as `python -m prism.audit_build --identifiability-csv <path> --identifiability-source-commit <sha>`, that joins the three sources above by feature index and writes `data/audit/features.csv` plus a provenance record (`data/results/req2_feature_audit_provenance.json`) with the model, SAE, and corpus identity, and a git commit hash. It is not part of the per-run experiment pipeline `features.py` exposes and is not expected to run again unless the upstream audit or the corpus choice changes.
+
+The provenance record identifies the identifiability CSV by `identifiability_source_repo`, `identifiability_source_commit` (the sae-bounding commit that produced it, required with no default since it changes every regeneration and shouldn't be guessed), and `identifiability_source_sha256` (the file's own checksum, computed at build time). It does not record the local filesystem path the CSV was read from, which was machine-specific and not itself part of the file's identity. `build_feature_audit_table()` checks `identifiability_source_commit` is a well-formed 40-character git SHA before doing anything else, but that's a format check, not a verification — it still isn't checked against the commit that actually produced `identifiability_csv`, because that requires a pinned expected value to check against, and `sae-bounding` PR #6 hasn't merged yet (tracked in issue #17). Blocking the build entirely until that verification exists was considered and rejected for now: REQ-2 needed `data/audit/features.csv` to exist well before #6 could realistically merge, and a hard block would have made this ADR's own resolution impossible to land. The gap is documented, not hidden, and #17 stays open until it's closed for real.
+
+**Alternatives considered:** A corpus native to this repo (e.g., reusing `RECONSTRUCTION_VALIDATION_PROMPTS`, REQ-1's 8-sentence, 120-token set) — rejected as too small to produce a meaningful per-feature rate across 16,384 features. Streaming the full Pile or a larger slice — rejected as unnecessary for a covariate used to balance a sample, not to estimate the primary effect, and disproportionate to a 3-day sprint's time budget.
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
