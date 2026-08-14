@@ -14,6 +14,7 @@ this project (REQ-2's sampler onward) treats as a static, read-only input.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -34,11 +35,17 @@ DEFAULT_CORPUS_REVISION = "127bfedcd5047750df5ccf3a12979a47bfa0bafa"
 DEFAULT_N_DOCUMENTS = 500
 DEFAULT_MAX_TOKENS_PER_DOCUMENT = 256
 
+# The only upstream repo this project currently reads a per-feature
+# identifiability table from (issue #17 / ADR-0011).
+DEFAULT_IDENTIFIABILITY_SOURCE_REPO = "aruneem-bhowmick/sae-bounding"
+
 
 def build_feature_audit_table(
     config: dict[str, Any],
     identifiability_csv: Path,
     *,
+    identifiability_source_commit: str,
+    identifiability_source_repo: str = DEFAULT_IDENTIFIABILITY_SOURCE_REPO,
     n_documents: int = DEFAULT_N_DOCUMENTS,
     max_tokens_per_document: int = DEFAULT_MAX_TOKENS_PER_DOCUMENT,
     corpus_dataset: str = DEFAULT_CORPUS_DATASET,
@@ -50,6 +57,14 @@ def build_feature_audit_table(
     Returns the assembled dataframe plus a provenance record documenting
     exactly how it was produced, so the result can be reconstructed from
     logged config alone per CLAUDE.md's reproducibility rule.
+
+    ``identifiability_source_commit`` (the sae-bounding commit that produced
+    ``identifiability_csv``) has no default -- it changes with every
+    regeneration on the sae-bounding side, and guessing it would silently
+    misattribute provenance rather than surface that it wasn't recorded.
+    The CSV's own content is checksummed here regardless, so the provenance
+    record identifies what was actually read, not just where a local
+    (and typically machine-specific) copy of it happened to sit on disk.
     """
     identifiability = pd.read_csv(identifiability_csv)
     missing_columns = {"feature_id", "identifiability_score"} - set(identifiability.columns)
@@ -93,12 +108,18 @@ def build_feature_audit_table(
         "sae_checkpoint_revision": config["sae"]["checkpoint_revision"],
         "sae_checkpoint_sha256": config["sae"]["checkpoint_sha256"],
         "hook_name": config["sae"]["hook_name"],
-        "identifiability_source_csv": str(identifiability_csv),
+        "identifiability_source_repo": identifiability_source_repo,
+        "identifiability_source_commit": identifiability_source_commit,
+        "identifiability_source_sha256": _sha256(identifiability_csv),
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **corpus_provenance,
     }
     return table, provenance
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _load_corpus(
@@ -135,6 +156,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment.yaml")
     parser.add_argument("--identifiability-csv", required=True)
+    parser.add_argument(
+        "--identifiability-source-commit",
+        required=True,
+        help="sae-bounding commit that produced --identifiability-csv (no default; must be stated explicitly)",
+    )
+    parser.add_argument(
+        "--identifiability-source-repo", default=DEFAULT_IDENTIFIABILITY_SOURCE_REPO
+    )
     parser.add_argument("--output", default="data/audit/features.csv")
     parser.add_argument(
         "--provenance-output", default="data/results/req2_feature_audit_provenance.json"
@@ -151,6 +180,8 @@ def main() -> None:
     table, provenance = build_feature_audit_table(
         config,
         Path(args.identifiability_csv),
+        identifiability_source_commit=args.identifiability_source_commit,
+        identifiability_source_repo=args.identifiability_source_repo,
         n_documents=args.n_documents,
         max_tokens_per_document=args.max_tokens_per_document,
     )

@@ -51,7 +51,7 @@ def test_build_feature_audit_table_rejects_missing_column(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="missing required column"):
-        audit_build.build_feature_audit_table(_config(), path)
+        audit_build.build_feature_audit_table(_config(), path, identifiability_source_commit="abc123")
 
 
 def test_build_feature_audit_table_rejects_row_count_mismatch(
@@ -61,7 +61,7 @@ def test_build_feature_audit_table_rejects_row_count_mismatch(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="rows but the"):
-        audit_build.build_feature_audit_table(_config(), path)
+        audit_build.build_feature_audit_table(_config(), path, identifiability_source_commit="abc123")
 
 
 def test_build_feature_audit_table_rejects_non_contiguous_feature_ids(
@@ -74,7 +74,7 @@ def test_build_feature_audit_table_rejects_non_contiguous_feature_ids(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="not exactly 0"):
-        audit_build.build_feature_audit_table(_config(), path)
+        audit_build.build_feature_audit_table(_config(), path, identifiability_source_commit="abc123")
 
 
 def test_build_feature_audit_table_joins_aligned_features_by_index(
@@ -89,8 +89,50 @@ def test_build_feature_audit_table_joins_aligned_features_by_index(
     )
     monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
 
-    table, provenance = audit_build.build_feature_audit_table(_config(), path)
+    table, provenance = audit_build.build_feature_audit_table(
+        _config(), path, identifiability_source_commit="abc123"
+    )
 
     assert list(table["feature_id"]) == [0, 1, 2]
     np.testing.assert_allclose(table["activation_frequency"], [0.1, 0.2, 0.3])
     assert provenance["hook_name"] == "blocks.4.hook_resid_pre"
+
+
+def test_build_feature_audit_table_records_source_identity_not_a_local_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_identifiability(tmp_path, [0, 1, 2])
+    monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
+    monkeypatch.setattr(
+        audit_build, "measure_activation_frequencies", lambda loaded, batches: np.array([0.1, 0.2, 0.3])
+    )
+    monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
+
+    _, provenance = audit_build.build_feature_audit_table(
+        _config(),
+        path,
+        identifiability_source_commit="abc123",
+        identifiability_source_repo="someone/sae-bounding-fork",
+    )
+
+    assert "identifiability_source_csv" not in provenance
+    assert provenance["identifiability_source_repo"] == "someone/sae-bounding-fork"
+    assert provenance["identifiability_source_commit"] == "abc123"
+    assert provenance["identifiability_source_sha256"] == audit_build._sha256(path)
+
+
+def test_build_feature_audit_table_defaults_the_source_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_identifiability(tmp_path, [0, 1, 2])
+    monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
+    monkeypatch.setattr(
+        audit_build, "measure_activation_frequencies", lambda loaded, batches: np.array([0.1, 0.2, 0.3])
+    )
+    monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
+
+    _, provenance = audit_build.build_feature_audit_table(
+        _config(), path, identifiability_source_commit="abc123"
+    )
+
+    assert provenance["identifiability_source_repo"] == audit_build.DEFAULT_IDENTIFIABILITY_SOURCE_REPO
