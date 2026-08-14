@@ -1,0 +1,24 @@
+# Prism experiment configuration — single source of truth for a reproducible
+# run (CLAUDE.md §6). Every field below is either a settled design decision
+# (SPEC/ADR-backed) or an explicit TODO pending a later REQ. Do not fill a
+# TODO with a guessed value — resolve it via the REQ named next to it.
+
+model:
+  name: EleutherAI/pythia-70m  # SPEC §3.1: primary model (fast iteration, existing audit coverage)
+
+sae:
+  checkpoint_path: TODO  # REQ-1 / ADR-0002: existing-SAE vs. trained-from-scratch, not yet resolved
+
+injection:
+  layer: TODO  # REQ-10 / ADR-0009: UCARE compression-boundary layer, else the 2/3-depth fallback
+  strengths: TODO  # REQ-5 / ADR-0003: working strength band from the calibration pilot
+
+sampling:
+  seeds: [0, 1, 2]  # REQ-6 / ADR-0008: multiple seeds per condition to estimate variance at temperature 1
+
+generation:
+  temperature_qualitative: 0  # ADR-0008: deterministic, for calibration pilots and report examples
+  temperature_systematic: 1   # ADR-0008: for every trial feeding the statistics
+
+judge:
+  model: TODO  # ADR-0004: Anthropic API judge — pin the specific model id when REQ-8 is implemented
