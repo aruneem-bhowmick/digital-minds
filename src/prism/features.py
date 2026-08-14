@@ -56,8 +56,10 @@ def stratified_sample(df: pd.DataFrame, n_total: int = DEFAULT_N_TOTAL, seed: in
     ``covariate_bin`` (which norm x frequency cell the feature fell into,
     the mechanism that keeps the balance).
     """
-    if n_total <= 0:
-        raise ValueError("n_total must be positive")
+    if n_total < 3:
+        raise ValueError(
+            f"n_total must be at least 3 to draw from all three tertiles, got {n_total}"
+        )
 
     working = df.copy()
     working["identifiability_tertile"] = _assign_tertiles(working["identifiability_score"])

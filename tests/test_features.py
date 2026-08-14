@@ -212,8 +212,18 @@ def test_stratified_sample_rejects_a_tertile_too_small_to_satisfy_n_total() -> N
 def test_stratified_sample_rejects_non_positive_n_total() -> None:
     population = _synthetic_population(n=30)
 
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError, match="at least 3"):
         stratified_sample(population, n_total=0, seed=0)
+
+
+def test_stratified_sample_rejects_n_total_too_small_for_three_tertiles() -> None:
+    # n_total=1 or 2 gives at least one tertile a count of 0, which would
+    # otherwise reach pd.concat([]) inside _balanced_within_stratum and
+    # crash with a confusing pandas-internal error rather than a clear one.
+    population = _synthetic_population(n=30)
+
+    with pytest.raises(ValueError, match="at least 3"):
+        stratified_sample(population, n_total=2, seed=0)
 
 
 # N/A: identifiability_score is a bounded coherence metric (the max absolute
