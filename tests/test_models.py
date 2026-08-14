@@ -157,6 +157,60 @@ def _fake_loaded_for_frequency(activations: list, encoded_output: "torch.Tensor"
     return LoadedPrismModel(model=_FakeModel(), sae=_FakeSAE(), hook_name="blocks.4.hook_resid_pre")
 
 
+def _fake_loaded_with_identity_encoder(activations: list) -> LoadedPrismModel:
+    """A LoadedPrismModel whose fake SAE returns whatever it's handed, unchanged.
+
+    Unlike _fake_loaded_for_frequency above (one fixed encode() output for
+    a single call over the whole corpus), this supports encode() being
+    called an arbitrary number of times with arbitrary chunk sizes, which
+    chunked measure_activation_frequencies() calls need to exercise.
+    """
+    activation_iterator = iter(activations)
+
+    class _FakeModel:
+        def run_with_hooks(self, tokens: object, fwd_hooks: list) -> None:
+            del tokens
+            ((_hook_name, hook_fn),) = fwd_hooks
+            hook_fn(next(activation_iterator), None)
+
+    class _FakeSAE:
+        def encode(self, acts: "torch.Tensor") -> "torch.Tensor":
+            return acts
+
+    return LoadedPrismModel(model=_FakeModel(), sae=_FakeSAE(), hook_name="blocks.4.hook_resid_pre")
+
+
+def test_measure_activation_frequencies_chunking_matches_unchunked() -> None:
+    # Four one-token documents; the fake SAE passes activations through
+    # unchanged, so each document's own values determine which "features"
+    # (columns) count as active. chunk_size=1 forces four separate encode()
+    # calls; chunk_size=1000 forces one, covering the whole corpus.
+    activations = [
+        torch.tensor([[1.0, 0.0]]),
+        torch.tensor([[0.0, 1.0]]),
+        torch.tensor([[1.0, 1.0]]),
+        torch.tensor([[0.0, 0.0]]),
+    ]
+    token_batches = [torch.zeros(1, 1, dtype=torch.long) for _ in activations]
+
+    chunked = measure_activation_frequencies(
+        _fake_loaded_with_identity_encoder(activations), token_batches, chunk_size=1
+    )
+    unchunked = measure_activation_frequencies(
+        _fake_loaded_with_identity_encoder(activations), token_batches, chunk_size=1000
+    )
+
+    np.testing.assert_allclose(chunked, unchunked)
+    np.testing.assert_allclose(chunked, [0.5, 0.5])
+
+
+def test_measure_activation_frequencies_rejects_non_positive_chunk_size() -> None:
+    loaded = _fake_loaded_with_identity_encoder([torch.tensor([[1.0]])])
+
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        measure_activation_frequencies(loaded, [torch.zeros(1, 1, dtype=torch.long)], chunk_size=0)
+
+
 def test_measure_activation_frequencies_counts_nonzero_encoded_activations() -> None:
     # Two one-token batches, concatenated to two rows before the single
     # encode() call; the fake SAE "encodes" that to a fixed 3-feature matrix

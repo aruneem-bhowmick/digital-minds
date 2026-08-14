@@ -174,8 +174,14 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
     }
 
 
+_DEFAULT_FREQUENCY_CHUNK_SIZE = 64
+
+
 def measure_activation_frequencies(
-    loaded: LoadedPrismModel, token_batches: list["torch.Tensor"]
+    loaded: LoadedPrismModel,
+    token_batches: list["torch.Tensor"],
+    *,
+    chunk_size: int = _DEFAULT_FREQUENCY_CHUNK_SIZE,
 ) -> np.ndarray:
     """Return each SAE feature's activation rate over pre-tokenized text (REQ-2 / ADR-0011).
 
@@ -185,23 +191,43 @@ def measure_activation_frequencies(
     and with the per-feature identifiability table without a remapping step.
     ``token_batches`` is pre-tokenized (and, for a large corpus, pre-truncated)
     by the caller -- this function only runs the forward passes and counts.
+
+    Processes ``token_batches`` ``chunk_size`` documents at a time rather
+    than concatenating and encoding the whole corpus in one pass, so peak
+    memory is bounded by one chunk's activations and encoded output instead
+    of the entire corpus's (issue #16: a dense encode() over the full
+    ~111K-token corpus this project actually runs is a few gigabytes; a
+    larger corpus without chunking risks an OOM). The result is
+    mathematically identical to a single unchunked pass; only peak memory
+    differs.
     """
     import torch
 
-    activations: list[torch.Tensor] = []
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    nonzero_counts: torch.Tensor | None = None
+    total_tokens = 0
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
         activations.append(act.detach())
         return act
 
-    for tokens in token_batches:
-        loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
+    for start in range(0, len(token_batches), chunk_size):
+        activations: list[torch.Tensor] = []
+        for tokens in token_batches[start : start + chunk_size]:
+            loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
 
-    acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
-    with torch.no_grad():
-        fires = (loaded.sae.encode(acts) != 0).float()
-        rates = fires.mean(dim=0)
-    return rates.cpu().numpy()
+        acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
+        with torch.no_grad():
+            fires = (loaded.sae.encode(acts) != 0).float()
+        chunk_counts = fires.sum(dim=0).cpu()
+        nonzero_counts = chunk_counts if nonzero_counts is None else nonzero_counts + chunk_counts
+        total_tokens += acts.shape[0]
+
+    if total_tokens == 0:
+        raise ValueError("token_batches contains no tokens")
+    return (nonzero_counts / total_tokens).numpy()
 
 
 def decoder_norms(loaded: LoadedPrismModel) -> np.ndarray:
