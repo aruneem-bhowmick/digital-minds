@@ -1,0 +1,160 @@
+"""Assemble data/audit/features.csv from the identifiability audit and a
+local activation-frequency measurement (REQ-2, ADR-0011, ADR-0013).
+
+This is a one-time data-preparation step, not part of the per-run
+experiment pipeline features.py exposes. The per-feature identifiability
+score is produced upstream, in ``sae-bounding``, and read here as a fixed
+input; activation frequency is measured here, over a pinned text corpus,
+using REQ-1's ``load_model_and_sae()``; decoder norm is read directly off
+the loaded SAE's own weights. The three are joined on feature index and
+written to ``data/audit/features.csv``, which everything downstream in
+this project (REQ-2's sampler onward) treats as a static, read-only input.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import yaml
+from datasets import load_dataset
+
+from prism.models import decoder_norms, load_model_and_sae, measure_activation_frequencies
+
+# ADR-0013: NeelNanda/pile-10k, a 10,000-document sample of the Pile, which
+# is Pythia's own training corpus. Pinned to a specific dataset revision, not
+# a mutable branch ref, per CLAUDE.md's reproducibility rule.
+DEFAULT_CORPUS_DATASET = "NeelNanda/pile-10k"
+DEFAULT_CORPUS_REVISION = "127bfedcd5047750df5ccf3a12979a47bfa0bafa"
+DEFAULT_N_DOCUMENTS = 500
+DEFAULT_MAX_TOKENS_PER_DOCUMENT = 256
+
+
+def build_feature_audit_table(
+    config: dict[str, Any],
+    identifiability_csv: Path,
+    *,
+    n_documents: int = DEFAULT_N_DOCUMENTS,
+    max_tokens_per_document: int = DEFAULT_MAX_TOKENS_PER_DOCUMENT,
+    corpus_dataset: str = DEFAULT_CORPUS_DATASET,
+    corpus_revision: str = DEFAULT_CORPUS_REVISION,
+    device: str = "cpu",
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Join identifiability, decoder norm, and activation frequency into one table.
+
+    Returns the assembled dataframe plus a provenance record documenting
+    exactly how it was produced, so the result can be reconstructed from
+    logged config alone per CLAUDE.md's reproducibility rule.
+    """
+    identifiability = pd.read_csv(identifiability_csv)
+    if list(identifiability.columns) != ["feature_id", "identifiability_score"]:
+        raise ValueError(
+            f"{identifiability_csv} does not have the expected "
+            "feature_id, identifiability_score schema"
+        )
+
+    loaded = load_model_and_sae(config, device=device)
+    n_features = loaded.sae.W_dec.shape[0]
+    if len(identifiability) != n_features:
+        raise ValueError(
+            f"identifiability table has {len(identifiability)} rows but the "
+            f"loaded SAE has {n_features} features -- these must come from "
+            "the same checkpoint"
+        )
+
+    token_batches, corpus_provenance = _load_corpus(
+        loaded,
+        dataset_name=corpus_dataset,
+        revision=corpus_revision,
+        n_documents=n_documents,
+        max_tokens_per_document=max_tokens_per_document,
+    )
+
+    table = identifiability.sort_values("feature_id").reset_index(drop=True)
+    table["decoder_norm"] = decoder_norms(loaded)
+    table["activation_frequency"] = measure_activation_frequencies(loaded, token_batches)
+
+    provenance = {
+        "model_name": config["model"]["name"],
+        "model_checkpoint_revision": config["model"]["checkpoint_revision"],
+        "sae_checkpoint_repo": config["sae"]["checkpoint_repo"],
+        "sae_checkpoint_revision": config["sae"]["checkpoint_revision"],
+        "sae_checkpoint_sha256": config["sae"]["checkpoint_sha256"],
+        "identifiability_source_csv": str(identifiability_csv),
+        "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **corpus_provenance,
+    }
+    return table, provenance
+
+
+def _load_corpus(
+    loaded: Any,
+    *,
+    dataset_name: str,
+    revision: str,
+    n_documents: int,
+    max_tokens_per_document: int,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Tokenize and truncate the first n_documents of a pinned HF dataset."""
+    dataset = load_dataset(dataset_name, revision=revision, split="train")
+    documents = dataset.select(range(min(n_documents, len(dataset))))
+
+    token_batches = []
+    total_tokens = 0
+    for record in documents:
+        tokens = loaded.model.to_tokens(record["text"])[:, :max_tokens_per_document]
+        token_batches.append(tokens)
+        total_tokens += tokens.shape[1]
+
+    provenance = {
+        "corpus_dataset": dataset_name,
+        "corpus_revision": revision,
+        "corpus_n_documents": len(token_batches),
+        "corpus_max_tokens_per_document": max_tokens_per_document,
+        "corpus_total_tokens": total_tokens,
+    }
+    return token_batches, provenance
+
+
+def main() -> None:
+    """CLI entry point: python -m prism.audit_build --identifiability-csv <path>."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/experiment.yaml")
+    parser.add_argument("--identifiability-csv", required=True)
+    parser.add_argument("--output", default="data/audit/features.csv")
+    parser.add_argument(
+        "--provenance-output", default="data/results/req2_feature_audit_provenance.json"
+    )
+    parser.add_argument("--n-documents", type=int, default=DEFAULT_N_DOCUMENTS)
+    parser.add_argument(
+        "--max-tokens-per-document", type=int, default=DEFAULT_MAX_TOKENS_PER_DOCUMENT
+    )
+    args = parser.parse_args()
+
+    with open(args.config, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+
+    table, provenance = build_feature_audit_table(
+        config,
+        Path(args.identifiability_csv),
+        n_documents=args.n_documents,
+        max_tokens_per_document=args.max_tokens_per_document,
+    )
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(output_path, index=False)
+
+    provenance_path = Path(args.provenance_output)
+    provenance_path.parent.mkdir(parents=True, exist_ok=True)
+    provenance_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
