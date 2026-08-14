@@ -151,6 +151,40 @@ prism/
 
 ---
 
+## ADR-0010: REQ-1 resolution — existing SAE, corrected base model
+
+**Context:** ADR-0002 left the SAE dependency "accepted, pending REQ-1 resolution." REQ-1's investigation checked `data/audit/` (empty in this repo) and the separate project that actually produces the identifiability audit (`sae-bounding`), against SAELens's registry.
+
+**Decision:** A residual-stream SAE for Pythia-70m-deduped exists and is the exact dictionary `sae-bounding` already scored — Hugging Face `ghidav/pythia-70m-deduped-sae`, path `test/blocks.4.hook_resid_pre/`, source revision `473774a054588503a90844f1afdb7b8fbf5f32a0`, SHA-256 `fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f`. Identity confirmed by matching checksum between the locally cached file, `sae-bounding`'s own manifest, and the Hugging Face LFS object. ADR-0002's first branch applies: load via SAELens where the format allows, minimal loader otherwise. No training fallback.
+
+This resolves against `EleutherAI/pythia-70m-deduped`, not the plain `EleutherAI/pythia-70m` `configs/experiment.yaml` named prior to this ADR — the SAE's own training config pins the deduped checkpoint explicitly. `configs/experiment.yaml` is corrected as part of REQ-1 to match.
+
+The checkpoint's training config also records `sae_lens_version: 2.1.3`, four major versions behind this project's pinned `sae-lens==6.49.1`, and `normalize_sae_decoder: false` — the decoder atoms are not unit-normalized in the saved weights, which is why ADR-0003's injection-time normalization step is necessary rather than redundant.
+
+**Alternatives considered:** None — this is a resolution of an already-accepted contingent decision, not a new choice between options.
+
+**Status:** Accepted.
+
+---
+
+## ADR-0011: Audit data provenance — features.csv has two sources
+
+**Context:** REQ-1's investigation surfaced a gap ADR-0005 didn't anticipate. `sae-bounding`'s identifiability audit computes frame-theoretic statistics (mutual coherence, Welch bound, coherence gap, cumulative coherence, RIP) per *dictionary* — one row per SAE checkpoint. REQ-2's stratified sampling and ADR-0005's `data/audit/features.csv` schema both need a score per *feature*. That doesn't exist yet, and neither does per-feature activation frequency, which `sae-bounding` has no way to produce since it never loads a base model.
+
+**Decision:** `data/audit/features.csv` is assembled from two sources, not pulled wholesale from one existing artifact as ADR-0005 implied:
+1. **Per-feature identifiability score** — produced by extending `sae-bounding` with a per-atom coherence function (the row-wise max of the Gram matrix `mutual_coherence()` already computes, retained instead of discarded after the global-max reduction). Stays in `sae-bounding`; this project still treats it as read-only input, consistent with ADR-0005's intent.
+2. **Per-feature activation frequency** — measured inside this project by running Pythia-70m-deduped and the SAE loaded via REQ-1's `load_model_and_sae()` over a text corpus, since that requires a loaded model and `sae-bounding` is decoder-matrix-only by design. This also resolves `sae-bounding`'s own `pending_measurement` gap on this checkpoint's operating L0, as a byproduct of counting per-feature firing rates.
+
+Decoder norm (the third covariate ADR-0005 lists) is a direct property of `W_dec` and needs no new measurement from either project.
+
+This is tracked as a REQ-2 blocking dependency (issue #7), not implemented as part of REQ-1.
+
+**Alternatives considered:** Computing the per-feature identifiability score inside this project instead of `sae-bounding` (rejected — duplicates geometry logic that already exists and is tested there; keeping the audit canonical in one place matches ADR-0005's separation of concerns). Treating the existing dictionary-level coherence number as a stand-in for every feature in that dictionary (rejected outright — that would erase the exact variation H1 is testing for).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
