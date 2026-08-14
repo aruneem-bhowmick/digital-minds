@@ -88,12 +88,7 @@ def stratified_sample(df: pd.DataFrame, n_total: int = DEFAULT_N_TOTAL, seed: in
 
     rng = np.random.default_rng(seed)
     counts = _tertile_counts(n_total)
-    # Computed once per distinct count and reused, not re-derived per tertile
-    # from whatever the shared rng's state happens to be by then -- tertiles
-    # asking for the same count (the common case when n_total % 3 == 0) must
-    # get the literal same target, not just the same formula applied to a
-    # different random draw.
-    targets_by_count: dict[int, dict[str, int]] = {}
+    targets_by_count = _nested_bin_targets(bins, sorted(set(counts.values())), rng)
 
     sampled_parts = []
     for tertile in TERTILE_LABELS:
@@ -104,8 +99,6 @@ def stratified_sample(df: pd.DataFrame, n_total: int = DEFAULT_N_TOTAL, seed: in
                 f"tertile {tertile!r} has only {len(stratum)} features, fewer than "
                 f"the {count} requested; lower n_total or check the audit table"
             )
-        if count not in targets_by_count:
-            targets_by_count[count] = _shared_bin_targets(bins, count, rng)
         sampled_parts.append(
             _balanced_within_stratum(stratum, targets_by_count[count], rng, tertile=tertile)
         )
@@ -162,19 +155,30 @@ def _tertile_counts(n_total: int) -> dict[str, int]:
     return counts
 
 
-def _shared_bin_targets(bins: list[str], count: int, rng: np.random.Generator) -> dict[str, int]:
-    """Split `count` evenly across `bins`, independent of any one tertile's
-    own covariate-bin availability.
+def _nested_bin_targets(
+    bins: list[str], counts: list[int], rng: np.random.Generator
+) -> dict[int, dict[str, int]]:
+    """Build a per-bin target for each distinct tertile count, so a larger
+    count's target is always the smaller count's target plus additional
+    picks layered on top -- never an independently re-randomized
+    composition for the same set of bins.
 
-    Reuses _round_robin_allocation with each bin's "capacity" set to
-    `count` itself, which can never bind (no single bin could need more
-    than the total being split), reducing it to a pure even split with a
-    randomized tie-break on the remainder. Called once per tertile with
-    that tertile's own `count`, so the target composition is the same
-    formula for every tertile rather than each tertile improvising its own
-    based on what it happens to have on hand.
+    _tertile_counts() never produces more than two distinct values,
+    differing by exactly 1 (n_total's remainder over 3 tertiles), so in
+    practice this means every bin's target across tertiles differs by at
+    most 1. The construction generalizes to any number of distinct counts:
+    sorted ascending, each target starts from the previous (smaller)
+    count's target and adds an evenly-split allocation of the difference,
+    so no bin can ever have a *smaller* target at a larger count.
     """
-    return _round_robin_allocation(dict.fromkeys(bins, count), count, rng)
+    ordered = sorted(counts)
+    targets: dict[int, dict[str, int]] = {}
+    targets[ordered[0]] = _round_robin_allocation(dict.fromkeys(bins, ordered[0]), ordered[0], rng)
+    for previous, count in zip(ordered, ordered[1:]):
+        extra = count - previous
+        extra_allocation = _round_robin_allocation(dict.fromkeys(bins, extra), extra, rng)
+        targets[count] = {b: targets[previous][b] + extra_allocation[b] for b in bins}
+    return targets
 
 
 def _balanced_within_stratum(

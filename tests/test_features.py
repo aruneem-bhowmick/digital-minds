@@ -12,8 +12,8 @@ from prism.features import (
     REQUIRED_COLUMNS,
     _assign_tertiles,
     _balanced_within_stratum,
+    _nested_bin_targets,
     _round_robin_allocation,
-    _shared_bin_targets,
     _tertile_counts,
     check_covariate_balance,
     load_feature_audit,
@@ -164,24 +164,35 @@ def test_round_robin_allocation_respects_bin_capacity() -> None:
     assert sum(allocation.values()) == 4
 
 
-def test_shared_bin_targets_splits_evenly() -> None:
+def test_nested_bin_targets_splits_a_single_count_evenly() -> None:
     rng = np.random.default_rng(0)
 
-    target = _shared_bin_targets(["a", "b", "c"], 6, rng)
+    targets = _nested_bin_targets(["a", "b", "c"], [6], rng)
 
-    assert target == {"a": 2, "b": 2, "c": 2}
+    assert targets == {6: {"a": 2, "b": 2, "c": 2}}
 
 
-def test_shared_bin_targets_is_the_same_formula_for_equal_counts() -> None:
+def test_nested_bin_targets_is_identical_across_tertiles_for_equal_counts() -> None:
     # Two tertiles asking for the same count get the same target composition
     # -- the whole point of a "shared" target, not each tertile improvising
-    # its own based on local availability.
-    bins = ["a", "b", "c"]
+    # its own based on local availability. A single count in the input list
+    # always produces one target regardless of how many tertiles use it.
+    targets = _nested_bin_targets(["a", "b", "c"], [6], np.random.default_rng(0))
 
-    low_target = _shared_bin_targets(bins, 6, np.random.default_rng(0))
-    high_target = _shared_bin_targets(bins, 6, np.random.default_rng(0))
+    assert targets[6] == {"a": 2, "b": 2, "c": 2}
 
-    assert low_target == high_target
+
+def test_nested_bin_targets_never_gives_a_larger_count_less_than_a_smaller_one() -> None:
+    rng = np.random.default_rng(0)
+    bins = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+
+    targets = _nested_bin_targets(bins, [13, 14], rng)
+
+    assert sum(targets[13].values()) == 13
+    assert sum(targets[14].values()) == 14
+    per_bin_difference = {b: targets[14][b] - targets[13][b] for b in bins}
+    assert all(diff in (0, 1) for diff in per_bin_difference.values())
+    assert sum(per_bin_difference.values()) == 1  # exactly one bin absorbs the +1
 
 
 def test_balanced_within_stratum_draws_from_every_targeted_bin() -> None:
@@ -272,6 +283,24 @@ def test_stratified_sample_matches_covariate_bin_composition_across_tertiles() -
     assert (counts_by_tertile.nunique() == 1).all()
 
 
+def test_stratified_sample_bin_counts_differ_by_at_most_one_when_tertile_counts_differ() -> None:
+    # n_total=40 (this project's real configs/experiment.yaml value) splits
+    # unevenly across tertiles (14/13/13). The nested target construction
+    # means low's per-bin counts can exceed medium/high's by at most 1 in
+    # any single bin, never by more, and never the other way around.
+    population = _synthetic_population()
+
+    sample = stratified_sample(population, n_total=40, seed=0)
+
+    counts_by_tertile = (
+        sample.groupby(["identifiability_tertile", "covariate_bin"], observed=True)
+        .size()
+        .unstack(fill_value=0)
+    )
+    pairwise_diffs = counts_by_tertile.to_numpy().max(axis=0) - counts_by_tertile.to_numpy().min(axis=0)
+    assert (pairwise_diffs <= 1).all()
+
+
 def test_stratified_sample_raises_clearly_when_covariates_correlate_with_identifiability() -> None:
     # decoder_norm and activation_frequency are monotonic in identifiability
     # score here, so every identifiability tertile's rows fall into exactly
@@ -291,7 +320,7 @@ def test_stratified_sample_raises_clearly_when_covariates_correlate_with_identif
         }
     )
 
-    with pytest.raises(ValueError, match="fewer than the .* needed to match the shared"):
+    with pytest.raises(ValueError, match=r"fewer than the .* needed to match the shared"):
         stratified_sample(population, n_total=9, seed=0)
 
 
