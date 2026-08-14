@@ -15,6 +15,7 @@ sae:
   checkpoint_revision: 473774a054588503a90844f1afdb7b8fbf5f32a0
   checkpoint_subfolder: test/blocks.4.hook_resid_pre
   checkpoint_sha256: fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f
+  checkpoint_cfg_sha256: c7d1932eec59818e34d5ad6d3c23a7d9a870ae9db5fa0f34fb90c60aabeec7ec
   hook_name: blocks.4.hook_resid_pre
 
 injection:

@@ -79,7 +79,13 @@ def test_config_has_no_remaining_model_or_sae_todos() -> None:
         config = yaml.safe_load(f)
 
     assert config["model"]["name"] != "TODO"
-    for field in ("checkpoint_repo", "checkpoint_revision", "checkpoint_subfolder", "checkpoint_sha256"):
+    for field in (
+        "checkpoint_repo",
+        "checkpoint_revision",
+        "checkpoint_subfolder",
+        "checkpoint_sha256",
+        "checkpoint_cfg_sha256",
+    ):
         assert config["sae"][field] != "TODO"
 
 

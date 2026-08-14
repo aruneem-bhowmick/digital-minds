@@ -80,26 +80,33 @@ def _download_sae_checkpoint(sae_cfg: dict[str, Any]) -> Path:
     """Download the audited SAE checkpoint at its pinned revision and verify its checksum.
 
     Per CLAUDE.md's reproducibility rule: the revision is pinned to a specific
-    commit (never ``main``), and the downloaded weights are checked against the
-    checksum recorded in ``configs/experiment.yaml`` before use.
+    commit (never ``main``), and every downloaded file is checked against the
+    checksum recorded in ``configs/experiment.yaml`` before use -- including
+    ``cfg.json``, which determines the hook name and dimensions
+    ``_validate_pairing`` trusts, not just the weights tensor.
     """
     repo_id = sae_cfg["checkpoint_repo"]
     revision = sae_cfg["checkpoint_revision"]
     subfolder = sae_cfg["checkpoint_subfolder"]
-    expected_sha256 = sae_cfg["checkpoint_sha256"]
+    expected_sha256_by_filename = {
+        "cfg.json": sae_cfg["checkpoint_cfg_sha256"],
+        "sae_weights.safetensors": sae_cfg["checkpoint_sha256"],
+    }
 
     weights_path = None
-    for filename in ("cfg.json", "sae_weights.safetensors"):
-        downloaded = hf_hub_download(
-            repo_id=repo_id,
-            filename=f"{subfolder}/{filename}",
-            revision=revision,
+    for filename, expected_sha256 in expected_sha256_by_filename.items():
+        downloaded = Path(
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=f"{subfolder}/{filename}",
+                revision=revision,
+            )
         )
+        _verify_sha256(downloaded, expected_sha256)
         if filename == "sae_weights.safetensors":
-            weights_path = Path(downloaded)
+            weights_path = downloaded
 
     assert weights_path is not None
-    _verify_sha256(weights_path, expected_sha256)
     return weights_path.parent
 
 
