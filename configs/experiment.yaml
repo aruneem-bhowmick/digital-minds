@@ -4,10 +4,18 @@
 # TODO with a guessed value — resolve it via the REQ named next to it.
 
 model:
-  name: EleutherAI/pythia-70m  # SPEC §3.1: primary model (fast iteration, existing audit coverage)
+  name: EleutherAI/pythia-70m-deduped  # SPEC §3.1 / ADR-0010: the SAE below was trained against the
+                                        # deduped checkpoint specifically, not plain pythia-70m
 
 sae:
-  checkpoint_path: TODO  # REQ-1 / ADR-0002: existing-SAE vs. trained-from-scratch, not yet resolved
+  # REQ-1 / ADR-0010: resolved to an existing SAE (ADR-0002's first branch) — the exact dictionary
+  # already scored by the identifiability audit. Revision is pinned to a commit, not `main`, and the
+  # checksum is recorded so a run can be reconstructed from this file alone.
+  checkpoint_repo: ghidav/pythia-70m-deduped-sae
+  checkpoint_revision: 473774a054588503a90844f1afdb7b8fbf5f32a0
+  checkpoint_subfolder: test/blocks.4.hook_resid_pre
+  checkpoint_sha256: fdcb4553f5c4b44ddf04e5bfc98b0eddf71ee64c7de657af6eaa3d5e0c95b90f
+  hook_name: blocks.4.hook_resid_pre
 
 injection:
   layer: TODO  # REQ-10 / ADR-0009: UCARE compression-boundary layer, else the 2/3-depth fallback
