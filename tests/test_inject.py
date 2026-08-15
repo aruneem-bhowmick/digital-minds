@@ -37,6 +37,14 @@ def test_inject_concept_rejects_negative_token_start_pos() -> None:
         inject_concept(model, torch.tensor([1.0, 0.0]), layer=LAYER, strength=2.0, token_start_pos=-1)
 
 
+def test_inject_concept_rejects_a_non_1d_decoder_atom() -> None:
+    model = _fake_model([HOOK_NAME])
+    full_matrix = torch.zeros(4, 2)  # shaped like sae.W_dec, not a single row
+
+    with pytest.raises(ValueError, match="1-D"):
+        inject_concept(model, full_matrix, layer=LAYER, strength=1.0, token_start_pos=0)
+
+
 # --- inject_concept / no_injection: passthrough -----------------------------
 
 
@@ -87,6 +95,22 @@ def test_inject_concept_zero_vector_atom_is_a_no_op() -> None:
     out = hook_fn(act, None)
 
     torch.testing.assert_close(out, act)
+
+
+def test_inject_concept_zero_norm_atom_does_not_alias_the_input_tensor() -> None:
+    # A zero-norm decoder_atom is often a row-view into the SAE's full W_dec
+    # matrix in real usage; the hook must not hold that same view (it would
+    # keep the whole matrix's storage alive for as long as the hook exists).
+    # Proven behaviorally: mutating the original tensor after building the
+    # hook must not change what the hook injects.
+    model = _fake_model([HOOK_NAME])
+    atom = torch.zeros(2)
+
+    ((_, hook_fn),) = inject_concept(model, atom, layer=LAYER, strength=1.0, token_start_pos=0)
+    atom.fill_(5.0)
+    out = hook_fn(torch.zeros(1, 1, 2), None)
+
+    torch.testing.assert_close(out, torch.zeros(1, 1, 2))
 
 
 def test_inject_concept_zero_strength_is_a_no_op() -> None:
@@ -145,6 +169,33 @@ def test_inject_concept_does_not_inject_before_the_start_position() -> None:
     out = hook_fn(torch.zeros(1, 3, 2), None)
 
     torch.testing.assert_close(out, torch.zeros(1, 3, 2))
+
+
+def test_inject_concept_raises_if_a_later_chunk_is_not_length_one() -> None:
+    # After the first (prefill) call, every later call within one generation
+    # must be exactly one new token -- TransformerLens's cached generate()
+    # contract. A longer later chunk means either use_past_kv_cache=False or
+    # this hook list was reused across more than one generate() call; both
+    # would silently inject into positions that must stay clean if this
+    # weren't caught.
+    model = _fake_model([HOOK_NAME])
+    atom = torch.tensor([1.0, 0.0])
+
+    ((_, hook_fn),) = inject_concept(model, atom, layer=LAYER, strength=1.0, token_start_pos=2)
+    hook_fn(torch.zeros(1, 3, 2), None)  # prefill
+
+    with pytest.raises(RuntimeError, match="length 2"):
+        hook_fn(torch.zeros(1, 2, 2), None)
+
+
+def test_inject_concept_hook_respects_the_calling_tensor_dtype() -> None:
+    model = _fake_model([HOOK_NAME])
+    atom = torch.tensor([1.0, 0.0])
+
+    ((_, hook_fn),) = inject_concept(model, atom, layer=LAYER, strength=1.0, token_start_pos=0)
+    out = hook_fn(torch.zeros(1, 1, 2, dtype=torch.float64), None)
+
+    assert out.dtype == torch.float64
 
 
 # --- inject_concept: state isolation across separate calls ------------------

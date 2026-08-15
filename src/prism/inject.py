@@ -47,6 +47,12 @@ def inject_concept(
     if decoder_atom is None:
         return []
 
+    if decoder_atom.dim() != 1:
+        raise ValueError(
+            f"decoder_atom must be a single 1-D vector, got shape {tuple(decoder_atom.shape)}; "
+            "pass one decoder row (e.g. sae.W_dec[feature_id]), not the full decoder matrix"
+        )
+
     if token_start_pos < 0:
         raise ValueError(f"token_start_pos must be non-negative, got {token_start_pos}")
 
@@ -91,12 +97,16 @@ def _scaled_atom(decoder_atom: "torch.Tensor", strength: float) -> "torch.Tensor
     unit-normalized in the saved weights, so raw atom norms vary across the
     dictionary and are not comparable until each one is put on the same
     scale first. A genuinely zero-norm atom skips the division (which would
-    otherwise be 0/0) and is returned as-is: scaling an all-zero vector by
-    any strength is still all zero.
+    otherwise be 0/0): scaling an all-zero vector by any strength is still
+    all zero. Returns a clone rather than the input tensor itself -- in real
+    usage ``decoder_atom`` is often a row-view into the SAE's full decoder
+    matrix (e.g. ``sae.W_dec[feature_id]``), and the hook closure built from
+    this return value would otherwise hold that view, and the whole decoder
+    matrix's storage behind it, alive for as long as the hook is attached.
     """
     norm = decoder_atom.norm()
     if norm == 0:
-        return decoder_atom
+        return decoder_atom.clone()
     return strength * (decoder_atom / norm)
 
 
@@ -115,24 +125,46 @@ def _make_injection_hook(
     fresh at zero every time ``inject_concept()`` is called (so nothing
     survives between trials), and advances that count by each chunk's
     length. That is exactly right for both the first, full-prompt call and
-    every later, single-new-token call a cached ``generate()`` makes; this
-    project's generation always goes through the cache, so a raw,
-    uncached forward pass that reprocesses a growing sequence from scratch
-    each call is not a case this hook needs to handle.
+    every later, single-new-token call a cached ``generate()`` makes.
+
+    This project's generation always goes through the cache, so after the
+    first call every later chunk must be exactly one token; a longer later
+    chunk means either ``generate()`` was called with
+    ``use_past_kv_cache=False`` (each step re-forwards the whole growing
+    sequence instead of just the new token) or this same hook list was
+    reused across more than one ``generate()`` call. Either way, the
+    position count above would already be past where the new chunk actually
+    starts, and it would silently inject into positions -- including prompt
+    tokens -- that must stay clean. Caught here, loudly, instead.
     """
     seen = 0
+    converted_vector_by_key: dict[tuple[Any, Any], "torch.Tensor"] = {}
 
     def _hook(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
         nonlocal seen
         del hook
         chunk_len = act.shape[1]
+        if seen > 0 and chunk_len != 1:
+            raise RuntimeError(
+                f"inject_concept()'s hook received a chunk of length {chunk_len} "
+                "after its first call, which only happens if generate() was "
+                "called with use_past_kv_cache=False, or this hook list was "
+                "reused across more than one generate() call. Build a fresh "
+                "hook list per generate() call, with the KV cache enabled "
+                "(the default)."
+            )
         start, end = seen, seen + chunk_len
         seen = end
 
         if end <= token_start_pos:
             return act  # whole chunk still precedes the injection start
 
-        vector = injected_vector.to(device=act.device, dtype=act.dtype)
+        key = (act.device, act.dtype)
+        vector = converted_vector_by_key.get(key)
+        if vector is None:
+            vector = injected_vector.to(device=act.device, dtype=act.dtype)
+            converted_vector_by_key[key] = vector
+
         if start >= token_start_pos:
             return act + vector  # whole chunk is at or past the start position
 
