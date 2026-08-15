@@ -302,6 +302,40 @@ Total 760 trials, inside `SPRINT-PLAN.md` §6's ~500–1,000 estimate. Control u
 
 ---
 
+## ADR-0018: REQ-8 resolution — judge model, concept grounding via top-activating context, and the detection/control grading split
+
+**Context:** ADR-0004 accepted "the Anthropic API" as the judge without pinning a model id, deferred to REQ-8 (flagged in `.claude/flagged-decisions.md` #1). Separately, `SPRINT-PLAN.md` §3.5's four-criterion rubric ("affirmative detection, correct concept identification, ... detection prior to verbalizing the concept, and output coherence") assumes a known concept exists per feature to grade naming accuracy against. `data/audit/features.csv` (ADR-0011/ADR-0013) carries no such label — only `identifiability_score`, `decoder_norm`, `activation_frequency` — and neither `sae-bounding` nor this project's own provenance records one anywhere. No earlier ADR anticipated this gap; it surfaced only once `judge.py` needed a real value to compare naming responses against.
+
+**Decision:**
+
+Judge model: `claude-opus-4-8`. Every judge call omits `temperature`/`top_p`/`top_k` (rejected outright on this model) and does not request extended thinking — a rubric-grading task over short transcripts doesn't need it, and skipping it keeps the roughly 760-trial scoring pass inside the token budget `SPRINT-PLAN.md` §6 estimates. `configs/experiment.yaml`'s `judge.model` field, previously `TODO`, is set to this value.
+
+Concept grounding: rather than inventing a per-feature label, `judge.py` derives grounding evidence from the same corpus REQ-2 already measured activation frequency against (`NeelNanda/pile-10k`, ADR-0013's pinned dataset revision). For each feature actually sampled and injected in REQ-6's systematic trials, `models.top_activating_snippets()` finds the token positions where that feature's SAE-encoded value is highest across the corpus and returns the surrounding text window for each. This mirrors how SAE decoder atoms are conventionally interpreted in the auto-interpretability literature — max-activating dataset examples as a feature's de facto identity — and avoids fabricating a label, which CLAUDE.md's non-negotiables rule out outright. The judge receives these snippets as reference evidence and is asked whether the model's naming-turn response plausibly names the same concept, rather than doing an exact-string match against a fixed label. Output: `data/results/feature_concept_grounding.json`, keyed by `feature_id`, carrying the same corpus/model/SAE provenance fields `req2_feature_audit_provenance.json` already uses. A feature that never fires in the corpus — a real, previously-documented outcome (ADR-0013 records 77 of 16,384 features never firing over the full corpus) — gets an empty snippet list; `score_trial()` tells the judge explicitly that no grounding evidence was found, rather than handing over an empty list silently, so a "cannot confirm" grade reads differently from "confirmed wrong."
+
+Grading schema splits by `prompt_type`, following ADR-0017's precedent for the same split in `model_response`'s own shape:
+- `detection`/`baseline` trials (two-turn): `{detected, concept_identified, concept_confidence, identified_before_verbalizing, coherent, reasoning}`. `concept_identified` and `identified_before_verbalizing` are `null` when `detected` is false, since there is no naming turn to grade in that case — the same convention `runner.py` already uses for `model_response["naming"]`.
+- `control` trials (single turn, no concept to name): `{affirmative, coherent, reasoning}`.
+
+Both schemas are enforced via `output_config.format` (structured JSON output), not free-text parsing, so a malformed judge response surfaces as a hard error rather than a silently mis-parsed score.
+
+**Alternatives considered:** A hand-authored concept label per sampled feature (rejected: with 40 sampled features and no existing interpretability artifact for this specific SAE checkpoint, authoring labels by inspection is either slow enough to blow the sprint's remaining budget or shortcut enough to risk being an uninformed guess dressed up as ground truth — worse than grounding in the model's own real firing pattern). A single shared JSON schema across every `prompt_type` with unused fields left `null` (rejected: control trials have no naming turn at all, and Lindsey's four criteria don't apply to them the same way a shared schema implies — leaving fields structurally present but meaningless would require every caller to already know which ones to ignore).
+
+**Status:** Accepted.
+
+---
+
+## ADR-0019: REQ-8 addendum — judge refusal handling
+
+**Context:** The first real run of `score_all_pending()` against the full 760-trial log hit a case ADR-0018 didn't cover: the judge model itself returned `stop_reason: "refusal"` on one transcript (`detection::feature4459::layer4::strength1::seed2`), rather than a malformed response or an infrastructure error. `score_trial()`'s original implementation treated this the same as any other failure -- raise and stop -- which halted the entire batch on trial 1 of roughly 760, on a transcript that, on inspection, is unremarkable degenerate text (no injection-strength "brain damage" content, nothing that reads as dual-use on its face).
+
+**Decision:** A judge refusal is a content-based signal about the trial being graded, not a bug in this pipeline, and CLAUDE.md's rule against curating out a documented failure mode applies to it the same way it applies to the subject model's own incoherent outputs. `score_trial()` now raises a dedicated `JudgeRefusalError` (still a `RuntimeError` subclass, so existing callers checking for that base class are unaffected) carrying the refusal's `stop_details.category` and `explanation` where the API supplies them. `score_all_pending()` catches specifically this exception, marks the trial `excluded: true` with the refusal detail as `exclusion_reason` (the same mechanism CLAUDE.md §5 already specifies for a trial that needs to be excluded from analysis), and continues the batch. `judge_scores` stays `null` on a refused trial, so it remains eligible for a retry on a later run rather than being permanently skipped. Every other exception -- a malformed response, an unrecognized `prompt_type`, a network or server error -- still propagates and halts the run, since those do mean something actually broke and shouldn't be silently absorbed the same way.
+
+**Alternatives considered:** Retrying the same request automatically on a refusal (rejected: a refusal isn't in the SDK's retryable-error set for good reason -- it's a deterministic-ish content judgment, not a transient failure, and blind retry-until-success risks masking a real signal rather than surfacing it). Halting the whole run on any refusal, requiring a human to manually skip past it (rejected: with a fixed trial budget across 40 features x 4 strengths x 3 seeds, a hand-curated skip list is exactly the kind of silent exclusion CLAUDE.md's non-negotiables warn against, and doesn't scale if more than one trial refuses across a full run).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.

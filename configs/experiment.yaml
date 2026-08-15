@@ -49,4 +49,6 @@ generation:
   max_new_tokens: 60  # REQ-6 / ADR-0017: per-turn generation budget, matching REQ-5's calibration pilot
 
 judge:
-  model: TODO  # ADR-0004: Anthropic API judge — pin the specific model id when REQ-8 is implemented
+  model: claude-opus-4-8  # REQ-8 / ADR-0018: Anthropic API judge, structured-output rubric grading
+  concept_grounding_k: 5  # REQ-8 / ADR-0018: top-activating snippets per feature handed to the judge
+  concept_grounding_context_tokens: 8  # REQ-8 / ADR-0018: window size (each side) per snippet

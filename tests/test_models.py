@@ -18,6 +18,7 @@ from prism.models import (
     load_model_and_sae,
     measure_activation_frequencies,
     save_reconstruction_result,
+    top_activating_snippets,
     validate_reconstruction,
 )
 
@@ -249,6 +250,144 @@ def test_decoder_norms_returns_row_wise_norm_of_w_dec() -> None:
     norms = decoder_norms(loaded)
 
     np.testing.assert_allclose(norms, [5.0, 1.0, 0.0])
+
+
+# --- top_activating_snippets: concept grounding (REQ-8, ADR-0018) -------
+
+
+def _fake_loaded_for_snippets(activations: list["torch.Tensor"]) -> LoadedPrismModel:
+    """Same run_with_hooks/identity-encode fake as _fake_loaded_with_identity_encoder,
+    plus a to_string() that renders a token-id tensor as space-joined integers, so
+    snippet text is deterministic and inspectable without a real tokenizer.
+    """
+    activation_iterator = iter(activations)
+
+    class _FakeModel:
+        def run_with_hooks(self, tokens: object, fwd_hooks: list) -> None:
+            del tokens
+            ((_hook_name, hook_fn),) = fwd_hooks
+            hook_fn(next(activation_iterator), None)
+
+        def to_string(self, tensor: "torch.Tensor") -> str:
+            return " ".join(str(i) for i in tensor.reshape(-1).tolist())
+
+    class _FakeSAE:
+        def encode(self, acts: "torch.Tensor") -> "torch.Tensor":
+            return acts
+
+    return LoadedPrismModel(model=_FakeModel(), sae=_FakeSAE(), hook_name="blocks.4.hook_resid_pre")
+
+
+def test_top_activating_snippets_ranks_by_activation_descending() -> None:
+    # One document, one feature (column 0), four tokens with distinct values.
+    activations = [torch.tensor([[[0.1], [0.9], [0.3], [0.0]]])]
+    token_batches = [torch.arange(4).reshape(1, 4)]
+
+    result = top_activating_snippets(
+        _fake_loaded_for_snippets(activations), [0], token_batches, k=2, context_tokens=1
+    )
+
+    assert [entry["snippet"] for entry in result[0]] == ["0 1 2", "1 2 3"]
+    np.testing.assert_allclose([entry["activation"] for entry in result[0]], [0.9, 0.3], rtol=1e-6)
+
+
+def test_top_activating_snippets_returns_empty_list_for_a_feature_that_never_fires() -> None:
+    # SAE encode() output is a ReLU floor -- zero counts as "never fired," same
+    # convention measure_activation_frequencies() uses for its nonzero check.
+    activations = [torch.tensor([[[0.0], [0.0], [0.0]]])]
+    token_batches = [torch.arange(3).reshape(1, 3)]
+
+    result = top_activating_snippets(_fake_loaded_for_snippets(activations), [0], token_batches, k=5)
+
+    assert result[0] == []
+
+
+def test_top_activating_snippets_spans_multiple_documents() -> None:
+    # Two one-token documents; the stronger activation lives in the second
+    # document, so its snippet must be drawn from that document's own tokens,
+    # not the first document's, even though it's ranked first in the result.
+    activations = [torch.tensor([[[0.5]]]), torch.tensor([[[0.8]]])]
+    token_batches = [torch.tensor([[100]]), torch.tensor([[200]])]
+
+    result = top_activating_snippets(
+        _fake_loaded_for_snippets(activations), [0], token_batches, k=5, context_tokens=2
+    )
+
+    assert [entry["snippet"] for entry in result[0]] == ["200", "100"]
+    np.testing.assert_allclose([entry["activation"] for entry in result[0]], [0.8, 0.5], rtol=1e-6)
+
+
+def test_top_activating_snippets_clips_the_window_at_document_boundaries() -> None:
+    activations = [torch.tensor([[[0.7], [0.2]]])]
+    token_batches = [torch.tensor([[10, 20]])]
+
+    result = top_activating_snippets(
+        _fake_loaded_for_snippets(activations), [0], token_batches, k=5, context_tokens=10
+    )
+
+    # context_tokens=10 would run off both ends of a 2-token document; the
+    # window must clip to what the document actually has, not raise or pad.
+    assert result[0][0]["snippet"] == "10 20"
+
+
+def test_top_activating_snippets_rejects_empty_feature_ids() -> None:
+    with pytest.raises(ValueError, match="feature_ids must be non-empty"):
+        top_activating_snippets(_fake_loaded_for_snippets([]), [], [])
+
+
+def test_top_activating_snippets_rejects_non_positive_k() -> None:
+    activations = [torch.tensor([[[0.5]]])]
+    token_batches = [torch.tensor([[1]])]
+
+    with pytest.raises(ValueError, match="k must be positive"):
+        top_activating_snippets(_fake_loaded_for_snippets(activations), [0], token_batches, k=0)
+
+
+def test_top_activating_snippets_skips_nan_activations() -> None:
+    # NaN fails both "<= 0" and "> 0" comparisons, so a naive non-positive
+    # check lets it slip into the heap and corrupt ordering; only the real
+    # 0.5 value should survive here.
+    nan = float("nan")
+    activations = [torch.tensor([[[nan], [0.5], [nan]]])]
+    token_batches = [torch.arange(3).reshape(1, 3)]
+
+    result = top_activating_snippets(_fake_loaded_for_snippets(activations), [0], token_batches, k=5)
+
+    assert len(result[0]) == 1
+    assert result[0][0]["activation"] == 0.5
+
+
+def test_top_activating_snippets_rejects_a_multi_row_token_batch() -> None:
+    # After the reshape(-1, d_model), token_idx indexes the flattened
+    # batch*seq axis, but the snippet window later reads row 0 only -- a
+    # batch size > 1 would silently pull text from the wrong row rather
+    # than raise. The check fires before any hook call, so an empty
+    # activations list is fine here.
+    token_batches = [torch.tensor([[1], [2]])]  # shape (2, 1): batch size 2
+
+    with pytest.raises(ValueError, match="batch size"):
+        top_activating_snippets(_fake_loaded_for_snippets([]), [0], token_batches, k=5)
+
+
+@pytest.mark.integration
+def test_top_activating_snippets_against_the_real_pair() -> None:
+    """Real model/SAE, small prompt set: shapes and value ranges only, the
+    same integration-test posture as REQ-1/REQ-2's own real-pair checks.
+    """
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    loaded = load_model_and_sae(config)
+    token_batches = [loaded.model.to_tokens(prompt) for prompt in RECONSTRUCTION_VALIDATION_PROMPTS]
+
+    result = top_activating_snippets(loaded, [0, 1], token_batches, k=3, context_tokens=4)
+
+    assert set(result.keys()) == {0, 1}
+    for snippets in result.values():
+        assert len(snippets) <= 3
+        for entry in snippets:
+            assert entry["activation"] > 0
+            assert isinstance(entry["snippet"], str) and entry["snippet"]
 
 
 @pytest.mark.integration
