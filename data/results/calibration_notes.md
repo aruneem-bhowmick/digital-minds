@@ -1,6 +1,6 @@
 # REQ-5 calibration notes
 
-Pilot run: `data/results/calibration_pilot.jsonl`, git commit `017cd86fc449f77cd6da109476c4d0bb3765e44c`. Five features spanning REQ-2's low/medium/high identifiability tertiles (feature_id 10769, 9253, 14030, 5015, 9564; identifiability_score 0.593-0.963), each injected at four candidate strengths (1, 2, 4, 8) using `inject.inject_concept()`, at temperature 0 (deterministic, ADR-0008) so every generation in this file is reproducible from its own logged config. Layer 4, `blocks.4.hook_resid_pre` (the ADR-0009 fractional-depth fallback, `layers.get_fallback_layer(6)`), not a resolved REQ-10 choice; REQ-10 hasn't run yet, and this pilot doesn't wait on it. Prompt: `prompts.detection_prompt()`. 60 generated tokens per trial.
+Pilot run: `data/results/calibration_pilot.jsonl`, git commit `933eeb709b6faf16b4708d9f499695c9a85797ba`. Five features spanning REQ-2's low/medium/high identifiability tertiles (feature_id 10769, 9253, 14030, 5015, 9564; identifiability_score 0.593-0.963), each injected at eight candidate strengths (1, 2, 4, 6, 8, 16, 32, 64) using `inject.inject_concept()`, at temperature 0 (deterministic, ADR-0008) so every generation in this file is reproducible from its own logged config. Layer 4, `blocks.4.hook_resid_pre` (the ADR-0009 fractional-depth fallback, `layers.get_fallback_layer(6)`), not a resolved REQ-10 choice; REQ-10 hasn't run yet, and this pilot doesn't wait on it. Prompt: `prompts.detection_prompt()`. 60 generated tokens per trial. Every strength discussed below, including the wider 16-64 sweep, is a real record in the committed log, not a paraphrase of a discarded run.
 
 ## Baseline: what strength 0 already looks like
 
@@ -22,13 +22,17 @@ Feature 10769 (low tertile, identifiability_score 0.677) produced the single mos
 
 That's a fluent, grammatical sentence that directly echoes the structure of `detection_prompt()`'s own wording ("pause and check your own current processing") without repeating the prompt verbatim. The other four features at this strength were already repeating a full sentence or clause on loop ("The answer to this question is yes." x7, "What is it?" x12), readable but clearly stuck.
 
-## Strength 4-6: repetition tightens, garbling starts to appear
+## Strength 4-6: still repetitive English, not yet character-level breakdown
 
-Sentences got shorter and looped faster, and one feature's output crossed from "repetitive English" into corrupted text: feature 9253 at strength 4 produced smart-quote characters rendered as the Unicode replacement character (`�`) around every quotation mark, a sign of the model's output distribution breaking down, not just looping. By strength 6, that same feature's text was still garbled the same way. This is the transition zone: some features hold together as (repetitive) English, others start to visibly degrade.
+Sentences got shorter and looped faster. Feature 9253's output at strength 4 and 6 uses smart-quote punctuation (`"`/`'`/`"`, Unicode U+201C/U+2019/U+201D) around every quoted clause, which renders as a mojibake-looking `�` in some terminal fonts; checked directly against the raw bytes, these are ordinary curly quotation marks, not corrupted output. At this strength the failure mode is still phrase-level repetition ("I'm not sure what you're asking," he said. "I'm not sure what you're asking." repeated), not the token- or character-level collapse that shows up at strength 8 and above. Worth correcting explicitly: an earlier draft of this note described this as Unicode corruption, which the raw record does not support.
 
 ## Strength 8: consistently too strong
 
-At strength 8, output across the sweep degenerates into token- or character-level loops with no sentence structure left: `. . . . . . . . . . . .`, `I'm not a good-cqe-cqe-cqe-cqe-cqe-cqe-`, `The-answered-answered-answered-answered-`. One feature (10769) still produced a readable fragment ("Upon your response, the following order shall be entered: (1) (2) (3)..."), but that's the exception, not the rule. A separate sweep at strengths 16, 32, and 64 (not kept in the committed log, since it only confirmed the same pattern more strongly) showed this failure mode getting uniformly worse with no exceptions left: pure punctuation loops (`::::::::`), repeated single words (`interruptinterruptinterrupt`), and nonsense character strings (`(\(\(\(\(\(\(`). This matches SPRINT-PLAN.md's documented "brain damage" failure mode exactly.
+At strength 8, output across the sweep degenerates into token- or character-level loops with no sentence structure left: `. . . . . . . . . . . .`, `I'm not a good-cqe-cqe-cqe-cqe-cqe-cqe-`, `The-answered-answered-answered-answered-`. One feature (10769) still produced a readable fragment ("Upon your response, the following order shall be entered: (1) (2) (3)..."), but that's the exception, not the rule.
+
+## Strength 16-64: the same failure mode, uniformly worse
+
+The wider sweep confirms strength 8's pattern rather than revealing anything new: pure punctuation loops (`::::::::`), repeated single words (`interruptinterruptinterrupt`), nonsense character strings (`(\(\(\(\(\(\(`), and single-word collapse (`readablereadablereadable`, `shall shall shall`). No feature produces a readable fragment anywhere in this range, unlike the one exception at strength 8. This matches SPRINT-PLAN.md's documented "brain damage" failure mode exactly, and getting uniformly worse rather than plateauing is itself useful evidence that strength 8 is a real boundary, not a one-off rough patch.
 
 ## One feature that never looked clean
 
@@ -36,4 +40,4 @@ Feature 5015 (medium tertile, identifiability_score 0.840) produced a repetition
 
 ## Decision
 
-`configs/experiment.yaml`'s `injection.strengths` is set to `[1, 2, 4, 8]`, spanning the observed weak/borderline edge through the confirmed too-strong boundary on this checkpoint, rather than narrowing to only the strengths that looked cleanest. REQ-9's regression already treats strength as a covariate, and REQ-6's systematic trials need real coverage of the transition, including the failure mode, not just the middle of the band.
+`configs/experiment.yaml`'s `injection.strengths` is set to `[1, 2, 4, 8]`, spanning the observed weak/borderline edge through the confirmed too-strong boundary on this checkpoint, rather than narrowing to only the strengths that looked cleanest. REQ-9's regression already treats strength as a covariate, and REQ-6's systematic trials need real coverage of the transition, including the failure mode, not just the middle of the band. The 16-64 sweep stays out of `injection.strengths` (it would only add more examples of the same already-confirmed failure mode without changing the calibration decision) but is kept in the committed pilot log in full, so the "getting uniformly worse" claim above is checkable against real records, not just this narrative.
