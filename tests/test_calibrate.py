@@ -95,6 +95,23 @@ def test_select_pilot_features_rejects_missing_tertile_column() -> None:
         select_pilot_features(sampled, n_features=5)
 
 
+def test_select_pilot_features_rejects_missing_decoder_norm_column() -> None:
+    # run_calibration_pilot() reads decoder_norm off every row unconditionally;
+    # this must fail here, before the model/SAE load, not as a KeyError
+    # partway through a pilot run.
+    sampled = _sampled_df().drop(columns=["decoder_norm"])
+
+    with pytest.raises(ValueError, match="decoder_norm"):
+        select_pilot_features(sampled, n_features=5)
+
+
+def test_select_pilot_features_rejects_missing_feature_id_column() -> None:
+    sampled = _sampled_df().drop(columns=["feature_id"])
+
+    with pytest.raises(ValueError, match="feature_id"):
+        select_pilot_features(sampled, n_features=5)
+
+
 def test_select_pilot_features_rejects_n_features_below_three() -> None:
     sampled = _sampled_df()
 
@@ -128,13 +145,57 @@ def test_pilot_coherence_flag_flags_empty_string() -> None:
 
 
 def test_pilot_coherence_flag_flags_a_repetition_loop() -> None:
+    # An exact-phrase loop like this is caught by the repeated-segment
+    # check (the whole "the cat sat " block repeats verbatim), which runs
+    # ahead of the trigram check -- see test_pilot_coherence_flag_
+    # respects_a_custom_threshold for a case that exercises the trigram
+    # path specifically.
     text = "the cat sat " * 20
 
     flag = pilot_coherence_flag(text)
 
     assert flag["likely_degenerate"] is True
-    assert flag["reason"] == "high_repetition"
-    assert flag["repetition_rate"] > 0.3
+    assert flag["reason"] == "repeated_segment"
+
+
+def test_pilot_coherence_flag_flags_a_hyphenated_subword_loop() -> None:
+    # A real strength-8 pilot output: whitespace-splitting treats this as
+    # only 4 "words" (the hyphen-chain is one token), so the word-trigram
+    # count alone never sees it -- this is exactly the shape a bare
+    # trigram heuristic misses.
+    text = "I'm not a good-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-cqe-"
+
+    flag = pilot_coherence_flag(text)
+
+    assert flag["likely_degenerate"] is True
+    assert flag["reason"] == "repeated_segment"
+
+
+def test_pilot_coherence_flag_flags_a_punctuation_loop_with_no_word_boundaries() -> None:
+    text = "::::::::::::::-::-::-::-::-::-::-::-::-::-::-::-::-::-::-::-"
+
+    flag = pilot_coherence_flag(text)
+
+    assert flag["likely_degenerate"] is True
+    assert flag["reason"] == "repeated_segment"
+
+
+def test_pilot_coherence_flag_does_not_crash_when_min_words_is_below_three() -> None:
+    # min_words=1 lets a 2-word response past the too-short guard, which
+    # previously fell through to a trigram computation on zero trigrams
+    # (0/0 -> ZeroDivisionError). Must return a verdict, not raise.
+    flag = pilot_coherence_flag("no thanks", min_words=1)
+
+    assert flag["likely_degenerate"] is False
+    assert flag["repetition_rate"] is None
+
+
+def test_pilot_coherence_flag_does_not_flag_a_legitimately_doubled_word() -> None:
+    text = "That that is a common typo but it is still ordinary English prose here"
+
+    flag = pilot_coherence_flag(text)
+
+    assert flag["likely_degenerate"] is False
 
 
 # --- pilot_coherence_flag: ordinary coherent text ---------------------------
@@ -238,14 +299,18 @@ def test_save_pilot_records_overwrites_rather_than_appends(tmp_path) -> None:
 
 
 @pytest.fixture(scope="module")
-def loaded_pair():
+def config():
     with open(CONFIG_PATH, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        return yaml.safe_load(f)
+
+
+@pytest.fixture(scope="module")
+def loaded_pair(config):
     return load_model_and_sae(config)
 
 
 @pytest.mark.integration
-def test_run_calibration_pilot_produces_a_full_record_per_feature_strength_pair(loaded_pair) -> None:
+def test_run_calibration_pilot_produces_a_full_record_per_feature_strength_pair(loaded_pair, config) -> None:
     sampled = _sampled_df(rows_per_tertile=1)
     pilot_features = select_pilot_features(sampled, n_features=3, seed=0)
     layer = get_fallback_layer(loaded_pair.model.cfg.n_layers)
@@ -257,6 +322,8 @@ def test_run_calibration_pilot_produces_a_full_record_per_feature_strength_pair(
         layer=layer,
         layer_source="adr-0009-fallback",
         prompt=detection_prompt(),
+        config=config,
+        pilot_feature_seed=0,
         max_new_tokens=6,
     )
 
@@ -265,6 +332,9 @@ def test_run_calibration_pilot_produces_a_full_record_per_feature_strength_pair(
     assert record["layer"] == layer
     assert record["layer_source"] == "adr-0009-fallback"
     assert record["temperature"] == 0
+    assert record["model_name"] == config["model"]["name"]
+    assert record["sae_checkpoint_sha256"] == config["sae"]["checkpoint_sha256"]
+    assert record["pilot_feature_seed"] == 0
     assert isinstance(record["response_text"], str) and record["response_text"].strip() != ""
     assert record["git_commit"]
     assert record["timestamp"]
@@ -272,7 +342,7 @@ def test_run_calibration_pilot_produces_a_full_record_per_feature_strength_pair(
 
 
 @pytest.mark.integration
-def test_run_calibration_pilot_zero_strength_is_deterministic_baseline_text(loaded_pair) -> None:
+def test_run_calibration_pilot_zero_strength_is_deterministic_baseline_text(loaded_pair, config) -> None:
     sampled = _sampled_df(rows_per_tertile=1)
     pilot_features = select_pilot_features(sampled, n_features=3, seed=0).iloc[[0]]
     layer = get_fallback_layer(loaded_pair.model.cfg.n_layers)
@@ -284,6 +354,8 @@ def test_run_calibration_pilot_zero_strength_is_deterministic_baseline_text(load
         layer=layer,
         layer_source="adr-0009-fallback",
         prompt=detection_prompt(),
+        config=config,
+        pilot_feature_seed=0,
         max_new_tokens=6,
     )
     second = run_calibration_pilot(
@@ -293,6 +365,8 @@ def test_run_calibration_pilot_zero_strength_is_deterministic_baseline_text(load
         layer=layer,
         layer_source="adr-0009-fallback",
         prompt=detection_prompt(),
+        config=config,
+        pilot_feature_seed=0,
         max_new_tokens=6,
     )
 
