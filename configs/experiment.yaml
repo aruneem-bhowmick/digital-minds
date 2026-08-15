@@ -23,7 +23,7 @@ sae:
 
 injection:
   layer: TODO  # REQ-10 / ADR-0009: UCARE compression-boundary layer, else the 2/3-depth fallback
-  strengths: [1, 2, 4, 8]  # REQ-5 / ADR-0003: working band from the calibration pilot, spanning the
+  strengths: [1, 2, 4, 8]  # REQ-5 / ADR-0016: working band from the calibration pilot, spanning the
                             # weak/borderline edge through the confirmed too-strong boundary on this
                             # checkpoint -- see data/results/calibration_notes.md
 
