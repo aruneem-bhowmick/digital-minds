@@ -188,6 +188,45 @@ def test_unrelated_control_prompt_rejects_a_question_missing_a_required_field(tm
         unrelated_control_prompt(path)
 
 
+def test_unrelated_control_prompt_rejects_a_blank_id(tmp_path: Path) -> None:
+    fixture = _valid_question_set()
+    fixture["questions"][0]["id"] = "   "
+    path = _write_yaml(tmp_path, fixture)
+
+    with pytest.raises(ValueError, match="non-string or blank 'id'"):
+        unrelated_control_prompt(path)
+
+
+def test_unrelated_control_prompt_rejects_a_non_string_id(tmp_path: Path) -> None:
+    # A YAML list (or any unhashable value) reaching the `in seen_ids`
+    # membership check unguarded would raise TypeError instead of the
+    # documented ValueError.
+    fixture = _valid_question_set()
+    fixture["questions"][0]["id"] = ["not", "a", "string"]
+    path = _write_yaml(tmp_path, fixture)
+
+    with pytest.raises(ValueError, match="non-string or blank 'id'"):
+        unrelated_control_prompt(path)
+
+
+def test_unrelated_control_prompt_rejects_a_blank_question(tmp_path: Path) -> None:
+    fixture = _valid_question_set()
+    fixture["questions"][0]["question"] = "   "
+    path = _write_yaml(tmp_path, fixture)
+
+    with pytest.raises(ValueError, match="non-string or blank 'question'"):
+        unrelated_control_prompt(path)
+
+
+def test_unrelated_control_prompt_rejects_a_non_string_question(tmp_path: Path) -> None:
+    fixture = _valid_question_set()
+    fixture["questions"][0]["question"] = ["not", "a", "string"]
+    path = _write_yaml(tmp_path, fixture)
+
+    with pytest.raises(ValueError, match="non-string or blank 'question'"):
+        unrelated_control_prompt(path)
+
+
 def test_unrelated_control_prompt_rejects_a_duplicate_id(tmp_path: Path) -> None:
     fixture = _valid_question_set()
     fixture["questions"][1]["id"] = fixture["questions"][0]["id"]

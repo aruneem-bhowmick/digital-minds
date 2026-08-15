@@ -80,11 +80,12 @@ def unrelated_control_prompt(path: str | Path = DEFAULT_CONTROL_QUESTIONS_PATH) 
     measure that baseline agreement rate.
 
     Checks configs/control_questions.yaml (or `path`) for: a non-empty
-    version string, at least MIN_CONTROL_QUESTIONS entries, unique ids,
-    unique question text, and an expected_answer of "no" on every entry
-    (SPRINT-PLAN.md's "default-negative expected answer"). Raises
-    ValueError naming the specific rule violated on a malformed set, rather
-    than handing the rest of the pipeline a set it can't trust.
+    version string, at least MIN_CONTROL_QUESTIONS entries, a non-empty
+    string id and question on every entry, unique ids, unique question
+    text, and an expected_answer of "no" on every entry (SPRINT-PLAN.md's
+    "default-negative expected answer"). Raises ValueError naming the
+    specific rule violated on a malformed set, rather than handing the
+    rest of the pipeline a set it can't trust.
     """
     with open(path, encoding="utf-8") as handle:
         data: dict[str, Any] = yaml.safe_load(handle)
@@ -127,11 +128,19 @@ def _validate_control_question_set(data: dict[str, Any], path: str | Path) -> No
             raise ValueError(f"{path} question at index {index} is missing field(s): {missing}")
 
         question_id = entry["id"]
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise ValueError(
+                f"{path} question at index {index} has a non-string or blank 'id': {question_id!r}"
+            )
         if question_id in seen_ids:
             raise ValueError(f"{path} has a duplicate question id: {question_id!r}")
         seen_ids.add(question_id)
 
         question_text = entry["question"]
+        if not isinstance(question_text, str) or not question_text.strip():
+            raise ValueError(
+                f"{path} question at index {index} has a non-string or blank 'question': {question_text!r}"
+            )
         if question_text in seen_questions:
             raise ValueError(f"{path} has a duplicate question: {question_text!r}")
         seen_questions.add(question_text)
