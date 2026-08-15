@@ -227,6 +227,22 @@ The provenance record identifies the identifiability CSV by `identifiability_sou
 
 ---
 
+## ADR-0014: REQ-2 resolution — cross-repo identifiability checksum verified (closes #17)
+
+**Context:** ADR-0013 recorded the identifiability CSV's checksum but never checked it against anything, since `sae-bounding` PR #6 hadn't merged and there was no stable value to pin. That PR has since merged.
+
+**Decision:** `configs/experiment.yaml` gains an `identifiability_source:` block (`repo`, `commit`, `checksum`), matching the reproducibility pattern the `sae:` block already uses for the SAE checkpoint. `build_feature_audit_table()` now verifies `identifiability_csv`'s SHA-256 against `identifiability_source.checksum` before reading anything else from it, raising a clear error naming both the actual and expected checksum on a mismatch, instead of only recording whatever the file happened to contain. `identifiability_source_commit` and `identifiability_source_repo` moved from required CLI arguments to config fields, since they're no longer values that change on every invocation — they're a pinned identity, the same way the SAE checkpoint's revision is.
+
+Pinned values: repo `aruneem-bhowmick/sae-bounding`, commit `09cc4a4` (the PR #6 merge commit), checksum `b6ded2c9…03567a` (full value in config).
+
+The merge itself included one change beyond what ADR-0013 described: `feature_coherence()`'s reduction changed from `np.max(off_diagonal, axis=0)` to `axis=1`, with the accompanying unit test changed to a non-symmetric input to make the two axes produce different results. Checked before trusting it: a Gram matrix (`G = D^T @ D`) is symmetric by construction, and for a symmetric matrix `axis=0` and `axis=1` reductions of the same array are identical — proven directly (`np.array_equal`, real SAE decoder, zero difference) and confirmed by regenerating `results/per_feature/pythia-70m-deduped-residual-layer-4.csv` from the merged code: byte-identical to the pre-merge file. The change doesn't affect this project's data. The test case that "proves" a difference does so with a matrix that couldn't arise as a real Gram matrix (it isn't symmetric), which is worth knowing if that test is ever used as a template elsewhere, but isn't this project's concern to fix in a repo it doesn't own.
+
+**Alternatives considered:** Keeping `identifiability_source_commit` as a required CLI argument even after the merge — rejected once a real pinned value existed to check against; matching the SAE checkpoint's own config-driven pattern is more consistent and makes the CLI simpler, not more complex, for the common case.
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
