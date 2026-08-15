@@ -86,6 +86,13 @@ def unrelated_control_prompt(path: str | Path = DEFAULT_CONTROL_QUESTIONS_PATH) 
     "default-negative expected answer"). Raises ValueError naming the
     specific rule violated on a malformed set, rather than handing the
     rest of the pipeline a set it can't trust.
+
+    `path`'s default is relative to the current working directory, the
+    same convention every other config path in this project follows
+    (CLAUDE.md §6's `python -m prism.<module> --config configs/experiment.yaml`
+    invocation pattern assumes the repository root as the working
+    directory). This is a repo-checkout contract, not a packaged-resource
+    lookup; REQ-6's runner is expected to be invoked the same way.
     """
     with open(path, encoding="utf-8") as handle:
         data: dict[str, Any] = yaml.safe_load(handle)
