@@ -1,0 +1,66 @@
+# Unrelated-question control set (REQ-4, ADR-0015).
+#
+# Asked under the same injection as a detection trial, in place of
+# detection_prompt(), to check whether an affirmative detection answer
+# reflects a real internal signal or a generic yes-bias (SPRINT-PLAN.md
+# §3.4). Every question below has an unambiguous, model-independent correct
+# answer of "no" and covers a different everyday topic, so a systematic
+# yes-bias shows up as elevated "yes" answers across genuinely unrelated
+# questions, not just one.
+#
+# Bump `version` whenever a question's wording changes or the set grows or
+# shrinks. REQ-6's trial records should be able to name which version of
+# this set produced a given control trial.
+
+version: "1.0.0"
+
+questions:
+  - id: ocean_size
+    topic: geography
+    question: "Is the Pacific Ocean smaller than Lake Michigan?"
+    expected_answer: "no"
+
+  - id: roman_empire_start
+    topic: history
+    question: "Did the Roman Empire begin after the year 1500 CE?"
+    expected_answer: "no"
+
+  - id: triangle_sides
+    topic: geometry
+    question: "Does a triangle have exactly four sides?"
+    expected_answer: "no"
+
+  - id: sun_orbits_earth
+    topic: astronomy
+    question: "Does the Sun orbit the Earth?"
+    expected_answer: "no"
+
+  - id: antarctica_hemisphere
+    topic: geography
+    question: "Is Antarctica located north of the equator?"
+    expected_answer: "no"
+
+  - id: seven_even
+    topic: arithmetic
+    question: "Is seven an even number?"
+    expected_answer: "no"
+
+  - id: water_room_temperature
+    topic: chemistry
+    question: "Is water typically a solid at room temperature?"
+    expected_answer: "no"
+
+  - id: week_length
+    topic: calendar
+    question: "Does a standard week contain nine days?"
+    expected_answer: "no"
+
+  - id: human_leg_count
+    topic: biology
+    question: "Do humans typically have six legs?"
+    expected_answer: "no"
+
+  - id: chess_player_count
+    topic: games
+    question: "Does a standard game of chess start with three players?"
+    expected_answer: "no"

@@ -2,11 +2,12 @@
 
 SPRINT-PLAN.md §3.4 calls for three pieces: a detection question, a naming
 follow-up, and an unrelated-question control. ADR-0015 records where the
-control-question set lives and how each function maps onto Lindsey's
-introspection criteria, using the framing the REQ-4 build sequence itself
-names: detection, naming/accuracy, internality, and coherence. Coherence has
-no dedicated template -- REQ-8's judge scores it from whatever text a prompt
-elicits, not from a specific question.
+control-question set lives and how the three functions below map onto
+Lindsey's introspection criteria, using the framing the REQ-4 build sequence
+itself names: detection, naming/accuracy, internality, and coherence.
+Coherence has no dedicated template here -- REQ-8's judge scores it from
+whatever text any of the three prompts below elicits, not from a specific
+question.
 
 None of the wording below reproduces Lindsey (2025)'s own prompt text; each
 function serves the same experimental role with independently written
@@ -14,6 +15,15 @@ phrasing.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DEFAULT_CONTROL_QUESTIONS_PATH = "configs/control_questions.yaml"
+MIN_CONTROL_QUESTIONS = 8
+EXPECTED_CONTROL_ANSWER = "no"
 
 
 def detection_prompt() -> str:
@@ -56,3 +66,81 @@ def naming_subtask_prompt() -> str:
         "it as specifically as you can: what is the concept, word, or idea "
         "that came to mind, and where does it seem to be coming from?"
     )
+
+
+def unrelated_control_prompt(path: str | Path = DEFAULT_CONTROL_QUESTIONS_PATH) -> dict[str, Any]:
+    """Load and validate the versioned unrelated-question control set (ADR-0015).
+
+    SPRINT-PLAN.md §3.4, "Unrelated-question control". Targets Lindsey's
+    internality criterion indirectly: an affirmative detection_prompt()
+    answer only supports a genuinely internal signal if the same model,
+    under the same injection, doesn't also default to "yes" on questions
+    that have nothing to do with the injected concept. REQ-6/REQ-7 ask
+    these instead of detection_prompt() while injection is still active, to
+    measure that baseline agreement rate.
+
+    Checks configs/control_questions.yaml (or `path`) for: a non-empty
+    version string, at least MIN_CONTROL_QUESTIONS entries, unique ids,
+    unique question text, and an expected_answer of "no" on every entry
+    (SPRINT-PLAN.md's "default-negative expected answer"). Raises
+    ValueError naming the specific rule violated on a malformed set, rather
+    than handing the rest of the pipeline a set it can't trust.
+    """
+    with open(path, encoding="utf-8") as handle:
+        data: dict[str, Any] = yaml.safe_load(handle)
+    _validate_control_question_set(data, path)
+    return data
+
+
+def _validate_control_question_set(data: dict[str, Any], path: str | Path) -> None:
+    """Enforce the invariants unrelated_control_prompt()'s docstring promises.
+
+    Every check fails loudly with the specific rule it violated, rather
+    than letting a malformed set reach REQ-6 as if it were valid -- the
+    same defensive stance load_feature_audit() takes on
+    data/audit/features.csv.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a top-level mapping, got {type(data).__name__}")
+
+    version = data.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(f"{path} is missing a non-empty top-level 'version' string")
+
+    questions = data.get("questions")
+    if not isinstance(questions, list):
+        raise ValueError(f"{path} is missing a top-level 'questions' list")
+    if len(questions) < MIN_CONTROL_QUESTIONS:
+        raise ValueError(
+            f"{path} has {len(questions)} question(s), fewer than the "
+            f"{MIN_CONTROL_QUESTIONS} required"
+        )
+
+    seen_ids: set[str] = set()
+    seen_questions: set[str] = set()
+    for index, entry in enumerate(questions):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} question at index {index} is not a mapping")
+
+        missing = [key for key in ("id", "question", "expected_answer") if key not in entry]
+        if missing:
+            raise ValueError(f"{path} question at index {index} is missing field(s): {missing}")
+
+        question_id = entry["id"]
+        if question_id in seen_ids:
+            raise ValueError(f"{path} has a duplicate question id: {question_id!r}")
+        seen_ids.add(question_id)
+
+        question_text = entry["question"]
+        if question_text in seen_questions:
+            raise ValueError(f"{path} has a duplicate question: {question_text!r}")
+        seen_questions.add(question_text)
+
+        expected_answer = entry["expected_answer"]
+        if expected_answer != EXPECTED_CONTROL_ANSWER:
+            raise ValueError(
+                f"{path} question {question_id!r} has expected_answer "
+                f"{expected_answer!r}, not the required "
+                f"{EXPECTED_CONTROL_ANSWER!r} -- every control question must "
+                "have a default-negative expected answer (SPRINT-PLAN.md §3.4)"
+            )
