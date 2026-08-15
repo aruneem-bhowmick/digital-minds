@@ -294,6 +294,19 @@ def top_activating_snippets(
     heaps: dict[int, list[tuple[float, int, int]]] = {fid: [] for fid in feature_ids}
 
     for doc_idx, tokens in enumerate(token_batches):
+        if tokens.shape[0] != 1:
+            # After the reshape(-1, d_model) below, token_idx indexes the
+            # flattened batch*seq axis, but the snippet-window slice further
+            # down reads row 0 only (doc_tokens[0, start:end]) -- a batch
+            # size > 1 would silently pull the snippet text from the wrong
+            # row instead of raising. Every real caller (audit_build's
+            # per-document corpus loader) already produces one row per
+            # entry; this just makes that an enforced contract instead of
+            # an unstated assumption.
+            raise ValueError(
+                f"token_batches[{doc_idx}] has batch size {tokens.shape[0]}; each entry must "
+                "be a single document of shape (1, seq_len)"
+            )
         activations: list[torch.Tensor] = []
 
         def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":

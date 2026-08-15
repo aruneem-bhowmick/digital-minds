@@ -48,13 +48,20 @@ class _FakeJudgeClient:
         if isinstance(item, Exception):
             raise item
         if isinstance(item, str):
-            text = item
-            stop_reason = "end_turn"
-        else:
-            payload = dict(item)
-            stop_reason = payload.pop("_stop_reason", "end_turn")
-            text = json.dumps(payload)
-        return SimpleNamespace(stop_reason=stop_reason, content=[SimpleNamespace(type="text", text=text)])
+            return SimpleNamespace(
+                stop_reason="end_turn", content=[SimpleNamespace(type="text", text=item)]
+            )
+        payload = dict(item)
+        stop_reason = payload.pop("_stop_reason", "end_turn")
+        prepend_thinking = payload.pop("_prepend_thinking", False)
+        no_text_block = payload.pop("_no_text_block", False)
+        text = json.dumps(payload)
+        content = []
+        if prepend_thinking:
+            content.append(SimpleNamespace(type="thinking", text=""))
+        if not no_text_block:
+            content.append(SimpleNamespace(type="text", text=text))
+        return SimpleNamespace(stop_reason=stop_reason, content=content)
 
 
 def _detection_trial(*, feature_id: int = 7, affirmative: bool = True, naming: dict | None = "default") -> dict:
@@ -255,6 +262,23 @@ def test_score_trial_wraps_a_json_decode_failure_with_context() -> None:
     client = _FakeJudgeClient(["not valid json {{{"])
 
     with pytest.raises(ValueError, match="not valid JSON"):
+        score_trial(_control_trial(), client)
+
+
+def test_score_trial_finds_the_text_block_behind_a_leading_non_text_block() -> None:
+    # response.content[0] isn't a safe assumption in general -- select by
+    # type == "text" rather than trusting index 0.
+    client = _FakeJudgeClient([{**_CONTROL_SCORE, "_prepend_thinking": True}])
+
+    result = score_trial(_control_trial(), client)
+
+    assert result == _CONTROL_SCORE
+
+
+def test_score_trial_raises_a_clear_error_when_no_text_block_exists() -> None:
+    client = _FakeJudgeClient([{**_CONTROL_SCORE, "_no_text_block": True}])
+
+    with pytest.raises(ValueError, match="no text content block"):
         score_trial(_control_trial(), client)
 
 

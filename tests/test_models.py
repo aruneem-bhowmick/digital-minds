@@ -357,6 +357,18 @@ def test_top_activating_snippets_skips_nan_activations() -> None:
     assert result[0][0]["activation"] == 0.5
 
 
+def test_top_activating_snippets_rejects_a_multi_row_token_batch() -> None:
+    # After the reshape(-1, d_model), token_idx indexes the flattened
+    # batch*seq axis, but the snippet window later reads row 0 only -- a
+    # batch size > 1 would silently pull text from the wrong row rather
+    # than raise. The check fires before any hook call, so an empty
+    # activations list is fine here.
+    token_batches = [torch.tensor([[1], [2]])]  # shape (2, 1): batch size 2
+
+    with pytest.raises(ValueError, match="batch size"):
+        top_activating_snippets(_fake_loaded_for_snippets([]), [0], token_batches, k=5)
+
+
 @pytest.mark.integration
 def test_top_activating_snippets_against_the_real_pair() -> None:
     """Real model/SAE, small prompt set: shapes and value ranges only, the

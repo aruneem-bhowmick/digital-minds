@@ -245,12 +245,21 @@ def score_trial(
             "treating this like a content-based refusal"
         )
 
+    text_block = next((block for block in response.content if getattr(block, "type", None) == "text"), None)
+    if text_block is None:
+        block_types = [getattr(block, "type", None) for block in response.content]
+        raise ValueError(
+            f"judge response for trial {trial_record.get('trial_id')!r} had no text content "
+            f"block (stop_reason={response.stop_reason!r}, block types={block_types!r}) -- "
+            "output_config.format guarantees a text block for this model/request shape, but "
+            "index 0 specifically isn't a contract worth relying on"
+        )
     try:
-        parsed = json.loads(response.content[0].text)
+        parsed = json.loads(text_block.text)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"judge response for trial {trial_record.get('trial_id')!r} was not valid JSON "
-            f"(stop_reason={response.stop_reason!r}): {response.content[0].text[:500]!r}"
+            f"(stop_reason={response.stop_reason!r}): {text_block.text[:500]!r}"
         ) from exc
     missing = set(schema["required"]) - set(parsed)
     if missing:
