@@ -45,6 +45,8 @@ DEFAULT_GROUNDING_PATH = "data/results/feature_concept_grounding.json"
 DEFAULT_VALIDATION_SAMPLE_PATH = "data/results/judge_validation_sample.md"
 DEFAULT_VALIDATION_FLAG_PATH = "data/results/judge_validated.flag"
 DEFAULT_JUDGE_MODEL = "claude-opus-4-8"
+DEFAULT_SCORING_PROVENANCE_PATH = "data/results/judge_scoring_provenance.json"
+_WRITE_BATCH_SIZE = 10
 
 
 class JudgeRefusalError(RuntimeError):
@@ -236,8 +238,20 @@ def score_trial(
         category = getattr(stop_details, "category", None) if stop_details else None
         explanation = getattr(stop_details, "explanation", None) if stop_details else None
         raise JudgeRefusalError(trial_record.get("trial_id"), category, explanation)
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            f"judge response for trial {trial_record.get('trial_id')!r} was truncated at "
+            f"max_tokens={max_tokens} before completing -- raise max_tokens rather than "
+            "treating this like a content-based refusal"
+        )
 
-    parsed = json.loads(response.content[0].text)
+    try:
+        parsed = json.loads(response.content[0].text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"judge response for trial {trial_record.get('trial_id')!r} was not valid JSON "
+            f"(stop_reason={response.stop_reason!r}): {response.content[0].text[:500]!r}"
+        ) from exc
     missing = set(schema["required"]) - set(parsed)
     if missing:
         raise ValueError(
@@ -259,10 +273,15 @@ def score_all_pending(
     Fills in ``judge_scores`` on the existing line for each pending trial --
     ADR-0005's append-only convention governs *new* trials, not a
     previously-null field on one REQ-6/REQ-7 already logged. Rewrites the
-    whole file after every single trial scored, not once at the end, so an
-    interrupted run keeps everything already graded rather than losing the
-    entire pass -- the same resumability posture ``runner.py`` takes for
-    trial generation itself.
+    file every ``_WRITE_BATCH_SIZE`` trials scored, and once more via
+    ``finally`` on any exit (normal completion or a propagating exception),
+    rather than after every single trial -- a deliberate I/O tradeoff: an
+    interrupted run can lose at most one batch of progress instead of
+    exactly one trial, in exchange for cutting full-file rewrites by roughly
+    ``_WRITE_BATCH_SIZE``x on a large batch. The ``finally`` is what keeps
+    the crash-safety guarantee intact despite the batching -- a real error
+    partway through still flushes whatever was scored since the last batch
+    boundary before propagating.
 
     A trial the judge refuses to grade (``JudgeRefusalError``) is marked
     ``excluded`` with the refusal category/explanation as ``exclusion_reason``
@@ -270,7 +289,9 @@ def score_all_pending(
     not a bug, and shouldn't take the rest of the batch down with it. Any
     other exception still propagates and halts the run. A refused trial's
     ``judge_scores`` stays ``None``, so it remains eligible for a retry on a
-    later run rather than being permanently skipped.
+    later run rather than being permanently skipped -- and if that retry
+    succeeds, ``excluded``/``exclusion_reason`` are reset back to their
+    not-excluded state rather than left stale alongside a real score.
     """
     path = Path(trials_path)
     records = _read_all_records(path)
@@ -278,18 +299,28 @@ def score_all_pending(
     n_scored = 0
     n_skipped = 0
     n_refused = 0
-    for record in records:
-        if record.get("judge_scores") is not None:
-            n_skipped += 1
-            continue
-        try:
-            record["judge_scores"] = score_trial(record, judge_client, grounding, model=model)
-            n_scored += 1
-        except JudgeRefusalError as exc:
-            record["excluded"] = True
-            record["exclusion_reason"] = str(exc)
-            n_refused += 1
-        _write_all_records(path, records)
+    since_last_write = 0
+    try:
+        for record in records:
+            if record.get("judge_scores") is not None:
+                n_skipped += 1
+                continue
+            try:
+                record["judge_scores"] = score_trial(record, judge_client, grounding, model=model)
+                record["excluded"] = False
+                record["exclusion_reason"] = None
+                n_scored += 1
+            except JudgeRefusalError as exc:
+                record["excluded"] = True
+                record["exclusion_reason"] = str(exc)
+                n_refused += 1
+            since_last_write += 1
+            if since_last_write >= _WRITE_BATCH_SIZE:
+                _write_all_records(path, records)
+                since_last_write = 0
+    finally:
+        if since_last_write > 0:
+            _write_all_records(path, records)
 
     return {"scored": n_scored, "skipped": n_skipped, "refused": n_refused}
 
@@ -391,6 +422,37 @@ def _git_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
+def save_scoring_provenance(
+    model: str,
+    result: dict[str, int],
+    *,
+    trials_path: "str | Path" = DEFAULT_TRIALS_PATH,
+    output_path: "str | Path" = DEFAULT_SCORING_PROVENANCE_PATH,
+) -> Path:
+    """Record the judge model, code commit, and timestamp for a
+    ``score_all_pending()`` run (CLAUDE.md's reproducibility rule). Every
+    trial record already carries full *generation-time* provenance
+    (``model_response``'s own model/SAE/commit fields), but nothing
+    previously recorded which judge model, code commit, or timestamp
+    produced ``judge_scores`` -- this closes that gap the same way
+    ``req1_sae_validation.json`` and ``req2_feature_audit_provenance.json``
+    already do for their own run stages: one companion provenance file per
+    run, not embedded per-row, since every row from the same run shares it.
+    Overwrites on every call, describing the most recent scoring pass.
+    """
+    record = {
+        "judge_model": model,
+        "trials_path": str(trials_path),
+        "git_commit": _git_commit(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **result,
+    }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return output_path
+
+
 # --- REQ-8: human validation gate -------------------------------------------
 
 
@@ -422,14 +484,16 @@ def validate_judge_subsample(
 
     n = min(n, len(scored))
     types = sorted(by_type)
-    per_type_target = max(1, n // len(types))
+    base_count, remainder = divmod(n, len(types))
+    per_type_target = {t: base_count + (1 if i < remainder else 0) for i, t in enumerate(types)}
 
     sample: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for prompt_type in types:
         pool = list(by_type[prompt_type])
         rng.shuffle(pool)
-        for record in pool[:per_type_target]:
+        take = min(per_type_target[prompt_type], len(pool))
+        for record in pool[:take]:
             sample.append(record)
             seen_ids.add(record["trial_id"])
 
@@ -466,6 +530,16 @@ def _format_validation_report(sample: list[dict[str, Any]]) -> str:
         )
         lines.append("---\n")
     return "\n".join(lines)
+
+
+def _count_report_trials(path: "str | Path") -> int:
+    """Count a validate_judge_subsample() report's per-trial ``## <trial_id>``
+    headers -- the source of truth for how many trials a human actually
+    reviewed, rather than an assumption re-derived from CLI arguments at
+    confirmation time.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    return sum(1 for line in text.splitlines() if line.startswith("## "))
 
 
 def write_validation_flag(
@@ -538,12 +612,19 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.confirm_validated is not None:
-        records = _read_all_records(args.trials_path)
-        n_scored = sum(1 for r in records if r.get("judge_scores") is not None)
+        report_path = Path(args.validation_sample_path)
+        if report_path.exists():
+            # Ground truth: how many trials the actual report a human read covers,
+            # not an assumption re-derived from CLI flags at confirm time.
+            sample_size = _count_report_trials(report_path)
+        else:
+            records = _read_all_records(args.trials_path)
+            n_scored = sum(1 for r in records if r.get("judge_scores") is not None)
+            sample_size = min(args.validation_sample_size, n_scored)
         path = write_validation_flag(
             args.confirm_validated,
             trials_path=args.trials_path,
-            sample_size=min(args.validation_sample_size, n_scored),
+            sample_size=sample_size,
         )
         print(f"wrote {path}")
         return
@@ -575,6 +656,7 @@ def main() -> None:
     if "score" in steps:
         judge_client = anthropic.Anthropic()
         result = score_all_pending(args.trials_path, judge_client, grounding, model=model)
+        save_scoring_provenance(model, result, trials_path=args.trials_path)
         print(f"score_all_pending: {result}")
 
     if "validate" in steps:

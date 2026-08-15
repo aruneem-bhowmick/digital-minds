@@ -15,11 +15,13 @@ from prism.judge import (
     _build_control_prompt,
     _build_grounding_text,
     _build_two_turn_prompt,
+    _count_report_trials,
     _read_all_records,
     _write_all_records,
     collect_concept_grounding,
     load_concept_grounding,
     save_concept_grounding,
+    save_scoring_provenance,
     score_all_pending,
     score_trial,
     validate_judge_subsample,
@@ -239,6 +241,23 @@ def test_score_trial_raises_on_a_response_missing_required_fields() -> None:
         score_trial(_detection_trial(), client)
 
 
+def test_score_trial_raises_a_clear_error_on_max_tokens_truncation() -> None:
+    client = _FakeJudgeClient([{**_CONTROL_SCORE, "_stop_reason": "max_tokens"}])
+
+    with pytest.raises(ValueError, match="truncated"):
+        score_trial(_control_trial(), client)
+
+
+def test_score_trial_wraps_a_json_decode_failure_with_context() -> None:
+    # Not a real refusal or truncation -- just genuinely malformed output --
+    # so this should surface as a debuggable ValueError, not a bare
+    # json.JSONDecodeError with no trial context.
+    client = _FakeJudgeClient(["not valid json {{{"])
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        score_trial(_control_trial(), client)
+
+
 def test_score_trial_control_trial_never_has_a_naming_field_to_grade() -> None:
     # N/A: control trials never carry a "naming" key at all (ADR-0017's
     # record shape for prompt_type="control" has no detection/naming turn),
@@ -313,6 +332,45 @@ def test_score_all_pending_excludes_a_refused_trial_and_keeps_going(tmp_path) ->
     assert records[scorable["trial_id"]].get("excluded", False) is False
 
 
+def test_score_all_pending_clears_stale_exclusion_on_a_successful_retry(tmp_path) -> None:
+    # A trial refused on a prior run and excluded then, but the judge no
+    # longer refuses it on this run -- the stale exclusion must not survive
+    # alongside a real score, or downstream code filtering on `excluded`
+    # would silently drop a validly-scored trial.
+    path = tmp_path / "trials.jsonl"
+    previously_refused = {
+        **_control_trial(),
+        "excluded": True,
+        "exclusion_reason": "judge refused to grade trial '...' (category='bio'): stale reason",
+    }
+    _write_all_records(path, [previously_refused])
+    client = _FakeJudgeClient([_CONTROL_SCORE])
+
+    score_all_pending(path, client)
+
+    record = _read_all_records(path)[0]
+    assert record["judge_scores"] == _CONTROL_SCORE
+    assert record["excluded"] is False
+    assert record["exclusion_reason"] is None
+
+
+def test_score_all_pending_flushes_progress_on_finally_even_mid_batch(tmp_path) -> None:
+    # since_last_write hasn't reached the batch-write threshold when the
+    # second trial raises -- the `finally` block, not the periodic write,
+    # is what must persist the first trial's score here.
+    path = tmp_path / "trials.jsonl"
+    first = _control_trial(question_id="a")
+    second = _control_trial(question_id="b")
+    _write_all_records(path, [first, second])
+    client = _FakeJudgeClient([_CONTROL_SCORE, RuntimeError("simulated mid-batch failure")])
+
+    with pytest.raises(RuntimeError, match="simulated mid-batch failure"):
+        score_all_pending(path, client)
+
+    records = {r["trial_id"]: r for r in _read_all_records(path)}
+    assert records[first["trial_id"]]["judge_scores"] == _CONTROL_SCORE
+
+
 def test_score_all_pending_never_duplicates_rows(tmp_path) -> None:
     path = tmp_path / "trials.jsonl"
     _write_all_records(path, [_control_trial(question_id="a"), _control_trial(question_id="b")])
@@ -376,6 +434,43 @@ def test_save_then_load_concept_grounding_round_trips(tmp_path) -> None:
     assert load_concept_grounding(path) == grounding
 
 
+# --- save_scoring_provenance: judge-run reproducibility ----------------------
+
+
+def test_save_scoring_provenance_records_model_commit_and_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("prism.judge._git_commit", lambda: "cafef00d")
+    path = tmp_path / "provenance.json"
+
+    save_scoring_provenance(
+        "claude-opus-4-8",
+        {"scored": 5, "skipped": 2, "refused": 1},
+        trials_path="data/trials/trials.jsonl",
+        output_path=path,
+    )
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["judge_model"] == "claude-opus-4-8"
+    assert record["git_commit"] == "cafef00d"
+    assert record["trials_path"] == "data/trials/trials.jsonl"
+    assert record["scored"] == 5
+    assert record["skipped"] == 2
+    assert record["refused"] == 1
+    assert record["timestamp"]
+
+
+# --- _count_report_trials: source of truth for --confirm-validated -----------
+
+
+def test_count_report_trials_counts_per_trial_headers(tmp_path) -> None:
+    path = tmp_path / "report.md"
+    path.write_text(
+        "# Judge validation sample (2 trials)\n\n## trial-a\n\ncontent\n\n## trial-b\n\ncontent\n",
+        encoding="utf-8",
+    )
+
+    assert _count_report_trials(path) == 2
+
+
 # --- validate_judge_subsample -------------------------------------------------
 
 
@@ -409,6 +504,23 @@ def test_validate_judge_subsample_spans_multiple_prompt_types(tmp_path) -> None:
     sample = validate_judge_subsample(3, path, output_path=None)
 
     assert {r["prompt_type"] for r in sample} == {"detection", "baseline", "control"}
+
+
+def test_validate_judge_subsample_never_exceeds_n_even_with_fewer_types_than_n_allows(tmp_path) -> None:
+    # The old `max(1, n // len(types))` forced at least one record per type
+    # regardless of n, so n=1 against 3 present prompt_types returned 3
+    # records instead of 1. divmod-based allocation must not repeat that.
+    path = tmp_path / "trials.jsonl"
+    records = [
+        {**_detection_trial(), "judge_scores": _DETECTION_SCORE},
+        {**_baseline_trial(), "judge_scores": _DETECTION_SCORE},
+        {**_control_trial(), "judge_scores": _CONTROL_SCORE},
+    ]
+    _write_all_records(path, records)
+
+    sample = validate_judge_subsample(1, path, output_path=None)
+
+    assert len(sample) == 1
 
 
 def test_validate_judge_subsample_is_deterministic_under_a_fixed_seed(tmp_path) -> None:
