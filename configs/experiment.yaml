@@ -23,7 +23,9 @@ sae:
 
 injection:
   layer: TODO  # REQ-10 / ADR-0009: UCARE compression-boundary layer, else the 2/3-depth fallback
-  strengths: TODO  # REQ-5 / ADR-0003: working strength band from the calibration pilot
+  strengths: [1, 2, 4, 8]  # REQ-5 / ADR-0016: working band from the calibration pilot, spanning the
+                            # weak/borderline edge through the confirmed too-strong boundary on this
+                            # checkpoint -- see data/results/calibration_notes.md
 
 features:
   n_total: 40  # REQ-2 / SPRINT-PLAN.md §3.2: sample size within the 30-50 range the spec calls for

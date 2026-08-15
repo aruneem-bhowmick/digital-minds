@@ -263,6 +263,22 @@ None of the three functions reproduce Lindsey (2025)'s own wording. `SPRINT-PLAN
 
 ---
 
+## ADR-0016: REQ-5 resolution — pilot feature source, fallback layer, and the calibrated strength band
+
+**Context:** `SPRINT-PLAN.md` §3.3 specifies the pilot's shape (~5 features x 3-4 strengths, temperature 0) but leaves two implementation choices open, and REQ-5 needed both settled before the pilot could run at all: where the pilot's features come from, and what layer to inject into before REQ-10 has picked one.
+
+**Decision:** `select_pilot_features()` draws its ~5 features from REQ-2's already-sampled, tertile-labeled population (`data/results/sampled_features.csv`), not a fresh draw from the full audit table. The pilot exists to calibrate a strength band for REQ-6's systematic trials, and REQ-6 injects exactly this sampled population; drawing the pilot from a separately randomized set risked calibrating against features the systematic trials would never touch.
+
+The primary injection layer is REQ-10's decision, and REQ-10 hasn't run. Per ADR-0009's explicit fallback, `layers.get_fallback_layer(n_layers, fraction=2/3)` is implemented now, as the one piece of `layers.py` ADR-0009 already fully specifies independent of the UCARE trajectory `get_compression_boundary_layer()` will need. On Pythia-70m-deduped's six transformer blocks this resolves to layer 4, `blocks.4.hook_resid_pre`, the same hook point the SAE was already trained against. Every pilot record carries `layer_source: "adr-0009-fallback"` explicitly, and `configs/experiment.yaml`'s `injection.layer` field stays `TODO`: this is a stopgap value used to run the pilot, not the resolved REQ-10 choice, and the shared config should not imply otherwise.
+
+The pilot ran against the real model and SAE at candidate strengths 1, 2, 4, 6, 8, 16, 32, and 64, all committed in full to `data/results/calibration_pilot.jsonl` rather than discarding the strengths outside the final band: CLAUDE.md's rule against curating out incoherent trial output applies to the raw generations behind this decision, not only to the systematic trial data collected later. Strength 0 already loops into a repeated short phrase by 60 tokens on this raw, non-instruction-tuned checkpoint, which set the bar for "too weak": a strength that reproduces that same baseline pattern isn't showing an effect. Strength 1 was borderline (a literal no-op for one of five pilot features). Strength 2 produced the pilot's clearest coherent, on-topic response. Strengths 4-6 held together as (repetitive) English: one feature's output uses ordinary Unicode curly quotation marks that render oddly in some terminal fonts, not corrupted text, which an earlier draft of the pilot notes mischaracterized before being corrected against the raw record. Strength 8 was consistently degenerate across features, and the wider sweep (16-64) confirmed that failure mode gets uniformly worse with no exceptions, matching `SPRINT-PLAN.md`'s documented "brain damage" pattern. `configs/experiment.yaml`'s `injection.strengths` is set to `[1, 2, 4, 8]`: the full observed transition from weak/borderline through the confirmed too-strong boundary, not narrowed to only the strengths that looked cleanest, since REQ-9's regression already treats strength as a covariate and REQ-6 needs real coverage of the failure mode, not just the middle of the band. Full pilot records and per-strength notes live in `data/results/calibration_pilot.jsonl` and `data/results/calibration_notes.md`.
+
+**Alternatives considered:** Drawing pilot features fresh from the full audit table rather than REQ-2's sample (rejected: would let the pilot calibrate against features REQ-6 never actually injects). Narrowing the final strength band to only the strengths that produced legible text, e.g. dropping 8 (rejected: CLAUDE.md's rule against curating out incoherent trials applies to the calibration decision itself, not just to trial data collected later; a band that never samples the too-strong boundary would leave REQ-9's strength covariate untested at the one condition the source literature specifically flags).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
