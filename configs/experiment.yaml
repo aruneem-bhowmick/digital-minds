@@ -46,6 +46,7 @@ sampling:
 generation:
   temperature_qualitative: 0  # ADR-0008: deterministic, for calibration pilots and report examples
   temperature_systematic: 1   # ADR-0008: for every trial feeding the statistics
+  max_new_tokens: 60  # REQ-6 / ADR-0017: per-turn generation budget, matching REQ-5's calibration pilot
 
 judge:
   model: TODO  # ADR-0004: Anthropic API judge — pin the specific model id when REQ-8 is implemented
