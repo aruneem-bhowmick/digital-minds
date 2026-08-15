@@ -61,6 +61,17 @@ def inject_concept(
     return [(hook_name, _make_injection_hook(injected_vector, token_start_pos))]
 
 
+def no_injection(
+    model: "HookedTransformer", layer: int, token_start_pos: int
+) -> "list[tuple[str, Callable[[torch.Tensor, Any], torch.Tensor]]]":
+    """Explicit no-injection passthrough, sharing ``inject_concept``'s argument
+    shape (REQ-7) so a baseline-trial call site reads the same as an injected
+    one, differing only in which function name it calls.
+    """
+    del layer, token_start_pos  # kept for interface symmetry with inject_concept, unused here
+    return []
+
+
 def _resid_pre_hook_name(layer: int) -> str:
     """The residual-stream hook point this project injects into.
 
