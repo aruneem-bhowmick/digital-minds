@@ -243,6 +243,26 @@ The merge itself included one change beyond what ADR-0013 described: `feature_co
 
 ---
 
+## ADR-0015: REQ-4 resolution — prompt templates, control-set storage, and criterion mapping
+
+**Context:** `SPRINT-PLAN.md` §3.4 and the REQ-4 build-order entry call for three prompt templates and a versioned unrelated-question control set, but neither the SPEC nor ADR-0007's repository tree says where that control set should live or how "versioned" should be implemented. That gap needed a decision before `unrelated_control_prompt()` could be written, not an assumption baked silently into the code.
+
+**Decision:** `src/prism/prompts.py` implements three functions, each targeting one of the criteria named in the REQ-4 prompt sequence (detection, naming/accuracy, internality):
+
+- `detection_prompt()` returns a fixed string asking the model to check its own current processing for anything unusual and to answer with a plain yes or no before elaborating. The wording never mentions injection or steering, so the identical prompt serves REQ-6's injected trials and REQ-7's no-injection baseline without a second variant. Asking for a yes/no verdict before any description is a deliberate ordering, not a style choice: it is what makes "detection before verbalization" (Morris & Plunkett's causal-bypassing criterion, `SPRINT-PLAN.md` line 33) checkable at all from the transcript alone.
+- `naming_subtask_prompt()` returns a fixed follow-up string, meaningful only after an affirmative response to `detection_prompt()`, asking the model to identify what it noticed.
+- `unrelated_control_prompt()` returns the full contents of a small, versioned control-question set: at least 8 to 10 yes/no questions spanning unrelated domains, each with an expected answer of "no," matching `SPRINT-PLAN.md` §3.4's "default-negative expected answer" description of Lindsey's own bias control. This targets internality specifically: an affirmative answer to `detection_prompt()` only supports a genuine internal signal if the same model, under the same injection, does not also default to "yes" on questions with nothing to do with the injected concept.
+
+The control-question set lives in `configs/control_questions.yaml`, not `data/audit/`, `data/trials/`, or a Python constant inside `prompts.py`. `configs/` already holds `experiment.yaml`, the project's other externally editable, non-code experiment input (CLAUDE.md §6); the control questions are the same kind of artifact; a researcher should be able to add or reword a question without touching Python. `data/audit/` is reserved for the read-only identifiability audit (ADR-0005, ADR-0011) and `data/trials/` and `data/results/` for run output, neither of which describes a fixed set of prompt text. The file carries a top-level `version` string and, per question, a stable `id`, the `question` text, and `expected_answer`. `unrelated_control_prompt()` validates the loaded file before returning it (`version` present, at least 8 questions, unique ids, unique question text, every `expected_answer` equal to `"no"`) and raises a specific error naming which rule failed, the same defensive pattern `load_feature_audit()` already uses on `data/audit/features.csv`.
+
+None of the three functions reproduce Lindsey (2025)'s own wording. `SPRINT-PLAN.md`'s four-criterion framing (line 12: accuracy, grounding, internality, metacognitive representation) and the REQ-4 build sequence's own framing (detection, naming/accuracy, internality, coherence) name the criteria slightly differently; this project's code and docstrings use the REQ-4 framing consistently, since that is the wording the build sequence itself docstrings were asked to cite. Coherence has no dedicated template: it is judged by REQ-8 from whatever text a trial produces, regardless of which of the three prompts elicited it, so no function here claims to probe it.
+
+**Alternatives considered:** A Python constants list inside `prompts.py`, matching `models.py`'s `RECONSTRUCTION_VALIDATION_PROMPTS` pattern (rejected: that list is a fixed, one-off validation corpus not meant for routine editing, while the control-question set is explicitly meant to be auditable and extendable without a code change, per the REQ-4 build sequence). Storing the control set under `data/` (rejected: `data/` is reserved for audit input and run output per ADR-0005 and ADR-0011, and this file is neither).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
