@@ -262,7 +262,7 @@ def test_score_all_pending_only_scores_records_missing_judge_scores(tmp_path) ->
 
     result = score_all_pending(path, client)
 
-    assert result == {"scored": 1, "skipped": 1}
+    assert result == {"scored": 1, "skipped": 1, "refused": 0}
     assert len(client.calls) == 1
 
 
@@ -273,7 +273,7 @@ def test_score_all_pending_second_run_scores_nothing(tmp_path) -> None:
     score_all_pending(path, _FakeJudgeClient([_CONTROL_SCORE]))
     result = score_all_pending(path, _FakeJudgeClient([]))  # empty queue: any call would raise IndexError
 
-    assert result == {"scored": 0, "skipped": 1}
+    assert result == {"scored": 0, "skipped": 1, "refused": 0}
 
 
 def test_score_all_pending_persists_progress_before_a_later_failure(tmp_path) -> None:
@@ -290,6 +290,27 @@ def test_score_all_pending_persists_progress_before_a_later_failure(tmp_path) ->
     scored_ids = {r["trial_id"]: r["judge_scores"] is not None for r in records}
     assert scored_ids[first["trial_id"]] is True
     assert scored_ids[second["trial_id"]] is False
+
+
+def test_score_all_pending_excludes_a_refused_trial_and_keeps_going(tmp_path) -> None:
+    # A judge refusal is a content-based signal about the trial, not a bug --
+    # unlike a genuine failure (the previous test), it must not take the rest
+    # of the batch down with it.
+    path = tmp_path / "trials.jsonl"
+    refused = _control_trial(question_id="a")
+    scorable = _control_trial(question_id="b")
+    _write_all_records(path, [refused, scorable])
+    client = _FakeJudgeClient([{**_CONTROL_SCORE, "_stop_reason": "refusal"}, _CONTROL_SCORE])
+
+    result = score_all_pending(path, client)
+
+    assert result == {"scored": 1, "skipped": 0, "refused": 1}
+    records = {r["trial_id"]: r for r in _read_all_records(path)}
+    assert records[refused["trial_id"]]["judge_scores"] is None
+    assert records[refused["trial_id"]]["excluded"] is True
+    assert "refused" in records[refused["trial_id"]]["exclusion_reason"]
+    assert records[scorable["trial_id"]]["judge_scores"] == _CONTROL_SCORE
+    assert records[scorable["trial_id"]].get("excluded", False) is False
 
 
 def test_score_all_pending_never_duplicates_rows(tmp_path) -> None:

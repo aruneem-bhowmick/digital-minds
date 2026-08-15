@@ -324,6 +324,18 @@ Both schemas are enforced via `output_config.format` (structured JSON output), n
 
 ---
 
+## ADR-0019: REQ-8 addendum — judge refusal handling
+
+**Context:** The first real run of `score_all_pending()` against the full 760-trial log hit a case ADR-0018 didn't cover: the judge model itself returned `stop_reason: "refusal"` on one transcript (`detection::feature4459::layer4::strength1::seed2`), rather than a malformed response or an infrastructure error. `score_trial()`'s original implementation treated this the same as any other failure -- raise and stop -- which halted the entire batch on trial 1 of roughly 760, on a transcript that, on inspection, is unremarkable degenerate text (no injection-strength "brain damage" content, nothing that reads as dual-use on its face).
+
+**Decision:** A judge refusal is a content-based signal about the trial being graded, not a bug in this pipeline, and CLAUDE.md's rule against curating out a documented failure mode applies to it the same way it applies to the subject model's own incoherent outputs. `score_trial()` now raises a dedicated `JudgeRefusalError` (still a `RuntimeError` subclass, so existing callers checking for that base class are unaffected) carrying the refusal's `stop_details.category` and `explanation` where the API supplies them. `score_all_pending()` catches specifically this exception, marks the trial `excluded: true` with the refusal detail as `exclusion_reason` (the same mechanism CLAUDE.md §5 already specifies for a trial that needs to be excluded from analysis), and continues the batch. `judge_scores` stays `null` on a refused trial, so it remains eligible for a retry on a later run rather than being permanently skipped. Every other exception -- a malformed response, an unrecognized `prompt_type`, a network or server error -- still propagates and halts the run, since those do mean something actually broke and shouldn't be silently absorbed the same way.
+
+**Alternatives considered:** Retrying the same request automatically on a refusal (rejected: a refusal isn't in the SDK's retryable-error set for good reason -- it's a deterministic-ish content judgment, not a transient failure, and blind retry-until-success risks masking a real signal rather than surfacing it). Halting the whole run on any refusal, requiring a human to manually skip past it (rejected: with a fixed trial budget across 40 features x 4 strengths x 3 seeds, a hand-curated skip list is exactly the kind of silent exclusion CLAUDE.md's non-negotiables warn against, and doesn't scale if more than one trial refuses across a full run).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.

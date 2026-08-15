@@ -46,6 +46,29 @@ DEFAULT_VALIDATION_SAMPLE_PATH = "data/results/judge_validation_sample.md"
 DEFAULT_VALIDATION_FLAG_PATH = "data/results/judge_validated.flag"
 DEFAULT_JUDGE_MODEL = "claude-opus-4-8"
 
+
+class JudgeRefusalError(RuntimeError):
+    """The judge model declined to grade a trial (``stop_reason == "refusal"``).
+
+    A distinct exception type from a generic scoring failure (ADR-0018
+    addendum, 2026-08-15): the judge's own safety classifier -- not a
+    malformed response or an infrastructure problem -- is a content-based
+    signal about the *trial*, not a bug in this pipeline. ``score_all_pending()``
+    catches this specifically and excludes the trial rather than halting the
+    whole batch, per CLAUDE.md's exclusion mechanism and its rule against
+    curating out a documented failure mode; any other exception still
+    propagates and stops the run, since those usually do mean something
+    actually broke.
+    """
+
+    def __init__(self, trial_id: str | None, category: str | None, explanation: str | None) -> None:
+        self.trial_id = trial_id
+        self.category = category
+        self.explanation = explanation
+        super().__init__(
+            f"judge refused to grade trial {trial_id!r} (category={category!r}): {explanation}"
+        )
+
 # --- structured-output schemas: detection/baseline (two-turn) vs control ---
 
 _DETECTION_SCHEMA: dict[str, Any] = {
@@ -209,7 +232,10 @@ def score_trial(
         messages=[{"role": "user", "content": prompt_text}],
     )
     if response.stop_reason == "refusal":
-        raise RuntimeError(f"judge refused to grade trial {trial_record.get('trial_id')!r}")
+        stop_details = getattr(response, "stop_details", None)
+        category = getattr(stop_details, "category", None) if stop_details else None
+        explanation = getattr(stop_details, "explanation", None) if stop_details else None
+        raise JudgeRefusalError(trial_record.get("trial_id"), category, explanation)
 
     parsed = json.loads(response.content[0].text)
     missing = set(schema["required"]) - set(parsed)
@@ -237,21 +263,35 @@ def score_all_pending(
     interrupted run keeps everything already graded rather than losing the
     entire pass -- the same resumability posture ``runner.py`` takes for
     trial generation itself.
+
+    A trial the judge refuses to grade (``JudgeRefusalError``) is marked
+    ``excluded`` with the refusal category/explanation as ``exclusion_reason``
+    and the run continues -- a content-based refusal is data about that trial,
+    not a bug, and shouldn't take the rest of the batch down with it. Any
+    other exception still propagates and halts the run. A refused trial's
+    ``judge_scores`` stays ``None``, so it remains eligible for a retry on a
+    later run rather than being permanently skipped.
     """
     path = Path(trials_path)
     records = _read_all_records(path)
 
     n_scored = 0
     n_skipped = 0
+    n_refused = 0
     for record in records:
         if record.get("judge_scores") is not None:
             n_skipped += 1
             continue
-        record["judge_scores"] = score_trial(record, judge_client, grounding, model=model)
-        n_scored += 1
+        try:
+            record["judge_scores"] = score_trial(record, judge_client, grounding, model=model)
+            n_scored += 1
+        except JudgeRefusalError as exc:
+            record["excluded"] = True
+            record["exclusion_reason"] = str(exc)
+            n_refused += 1
         _write_all_records(path, records)
 
-    return {"scored": n_scored, "skipped": n_skipped}
+    return {"scored": n_scored, "skipped": n_skipped, "refused": n_refused}
 
 
 def _read_all_records(path: "str | Path") -> list[dict[str, Any]]:
