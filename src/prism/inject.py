@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
+    import pandas as pd
     import torch
     from transformer_lens import HookedTransformer
 
@@ -174,3 +176,267 @@ def _make_injection_hook(
         return act
 
     return _hook
+
+
+# --- REQ-5: strength calibration ---------------------------------------------
+#
+# ADR-0007 places REQ-5's calibration pilot in this file, next to REQ-3's
+# mechanism above, rather than a separate module. Everything below is a
+# distinct concern from inject_concept()/no_injection(): a small,
+# temperature-0 pilot that calls the mechanism above with a handful of
+# candidate strengths and reports what came out, so a working strength band
+# can be chosen and written into configs/experiment.yaml before REQ-6's
+# systematic trials run at scale.
+
+
+def select_pilot_features(pilot_source_df: "pd.DataFrame", n_features: int = 5, seed: int = 0) -> "pd.DataFrame":
+    """Draw a small pilot set spanning REQ-2's identifiability tertiles.
+
+    Pulls from ``pilot_source_df`` -- REQ-2's already-stratified,
+    tertile-labeled sample (``features.stratified_sample()``'s output,
+    ``data/results/sampled_features.csv`` by default) -- rather than
+    drawing fresh from the full audit table, so the pilot's features are
+    the same population REQ-6's systematic trials will eventually inject,
+    not a separately randomized set that could land on entirely different
+    features.
+    """
+    import pandas as pd
+
+    if "identifiability_tertile" not in pilot_source_df.columns:
+        raise ValueError(
+            "pilot_source_df must carry identifiability_tertile (from "
+            "features.stratified_sample()); pass REQ-2's sampled-feature "
+            "output, not the raw audit table"
+        )
+    if n_features < 3:
+        raise ValueError(f"n_features must be at least 3 to span all three tertiles, got {n_features}")
+
+    counts = _pilot_tertile_counts(n_features)
+    parts = []
+    for tertile, count in counts.items():
+        stratum = pilot_source_df[pilot_source_df["identifiability_tertile"] == tertile]
+        if len(stratum) < count:
+            raise ValueError(
+                f"tertile {tertile!r} has only {len(stratum)} sampled features, "
+                f"fewer than the {count} the pilot needs; lower n_features or "
+                "check the REQ-2 sample"
+            )
+        parts.append(stratum.sample(n=count, random_state=seed))
+
+    return pd.concat(parts, ignore_index=True)
+
+
+def _pilot_tertile_counts(n_features: int) -> dict[str, int]:
+    """Split n_features as evenly as possible across the three tertiles.
+
+    Mirrors ``features._tertile_counts()``'s round-robin remainder rule at
+    a much smaller scale (~5, not ~40); kept as its own short function
+    rather than importing that name across modules.
+    """
+    from prism.features import TERTILE_LABELS
+
+    base, remainder = divmod(n_features, 3)
+    counts = dict.fromkeys(TERTILE_LABELS, base)
+    for tertile in TERTILE_LABELS[:remainder]:
+        counts[tertile] += 1
+    return counts
+
+
+def pilot_coherence_flag(text: str, *, repetition_threshold: float = 0.3, min_words: int = 3) -> dict[str, Any]:
+    """A first-pass, automatic degenerate-output heuristic for one pilot generation.
+
+    Two simple signals, not a coherence judgment: text shorter than
+    ``min_words`` words is flagged outright (a generation collapsing to
+    near-nothing is itself a sign of "too strong"), otherwise the fraction
+    of repeated word trigrams is checked against ``repetition_threshold`` --
+    a model stuck in a repetition loop is the other documented shape of
+    "too strong" (SPRINT-PLAN.md's "brain damage" failure mode). This flag
+    is a starting point for the human read REQ-5's definition of done
+    requires, not a replacement for it: it catches obvious collapse, not
+    subtler incoherence.
+    """
+    from collections import Counter
+
+    words = text.split()
+    n_words = len(words)
+    if n_words < min_words:
+        return {"likely_degenerate": True, "reason": "too_short", "repetition_rate": None, "n_words": n_words}
+
+    trigrams = [tuple(words[i : i + 3]) for i in range(n_words - 2)]
+    counts = Counter(trigrams)
+    repeated = sum(count - 1 for count in counts.values() if count > 1)
+    repetition_rate = repeated / len(trigrams)
+
+    likely_degenerate = repetition_rate >= repetition_threshold
+    return {
+        "likely_degenerate": likely_degenerate,
+        "reason": "high_repetition" if likely_degenerate else None,
+        "repetition_rate": repetition_rate,
+        "n_words": n_words,
+    }
+
+
+def run_calibration_pilot(
+    loaded: Any,
+    pilot_features: "pd.DataFrame",
+    strengths: "list[float]",
+    *,
+    layer: int,
+    layer_source: str,
+    prompt: str,
+    max_new_tokens: int = 60,
+) -> "list[dict[str, Any]]":
+    """Run the REQ-5 pilot: every sampled feature x every candidate strength,
+    at temperature 0 (ADR-0008), returning one full record per pair.
+
+    ``loaded`` is a ``models.LoadedPrismModel``, typed as ``Any`` here to
+    avoid importing sae_lens/transformer_lens at this module's import time,
+    matching the lazy-import convention the mechanism above already uses.
+    ``layer_source`` is recorded on every record so a downstream reader --
+    a human, or the eventual calibration figure -- can tell an ADR-0009
+    fallback apart from a resolved REQ-10 layer without re-deriving it.
+    """
+    import subprocess
+    from datetime import datetime, timezone
+
+    git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    records: list[dict[str, Any]] = []
+
+    for _, feature_row in pilot_features.iterrows():
+        feature_id = int(feature_row["feature_id"])
+        decoder_atom = loaded.sae.W_dec[feature_id]
+
+        for strength in strengths:
+            tokens = loaded.model.to_tokens(prompt)
+            token_start_pos = tokens.shape[1] - 1
+
+            hooks = inject_concept(
+                loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos
+            )
+            with loaded.model.hooks(fwd_hooks=hooks):
+                output = loaded.model.generate(
+                    tokens, max_new_tokens=max_new_tokens, do_sample=False, verbose=False
+                )
+            response_text = loaded.model.to_string(output[0, tokens.shape[1] :])
+
+            records.append(
+                {
+                    "feature_id": feature_id,
+                    "identifiability_tertile": str(feature_row["identifiability_tertile"]),
+                    "identifiability_score": float(feature_row["identifiability_score"]),
+                    "decoder_norm": float(feature_row["decoder_norm"]),
+                    "layer": layer,
+                    "layer_source": layer_source,
+                    "strength": float(strength),
+                    "prompt": prompt,
+                    "temperature": 0,
+                    "response_text": response_text,
+                    "coherence": pilot_coherence_flag(response_text),
+                    "git_commit": git_commit,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+    return records
+
+
+def summarize_pilot(records: "list[dict[str, Any]]") -> str:
+    """Render every pilot record as a readable, strength-grouped text block.
+
+    Meant to be printed and read directly -- REQ-5's definition of done
+    requires a human judgment on top of ``pilot_coherence_flag()``'s
+    automatic signal, and that judgment needs something more legible than
+    the raw JSONL log to work from.
+    """
+    lines: list[str] = []
+    strengths = sorted({record["strength"] for record in records})
+
+    for strength in strengths:
+        lines.append(f"=== strength {strength} ===")
+        for record in records:
+            if record["strength"] != strength:
+                continue
+            flag = "DEGENERATE" if record["coherence"]["likely_degenerate"] else "ok"
+            preview = " ".join(record["response_text"].split())[:160]
+            lines.append(
+                f"  feature {record['feature_id']} ({record['identifiability_tertile']}, "
+                f"id_score={record['identifiability_score']:.3f}) [{flag}]: {preview}"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def save_pilot_records(records: "list[dict[str, Any]]", output_path: "Path | str") -> "Path":
+    """Persist run_calibration_pilot()'s output as JSONL, one record per line.
+
+    Overwritten on every run rather than append-only: unlike ``data/trials/``'s
+    ADR-0005 schema for systematic, judged trial records, a calibration
+    pilot is qualitative and re-run whenever the candidate strengths
+    change, and each run's log should reflect only that run's candidates,
+    not every candidate ever tried across every past pilot.
+    """
+    import json
+    from pathlib import Path
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+    return output_path
+
+
+def main() -> None:
+    """CLI entry point: python -m prism.inject --config configs/experiment.yaml.
+
+    Runs the full REQ-5 pilot against the real model/SAE pair, prints
+    ``summarize_pilot()``'s output for a human to read, and writes the full
+    record set to ``data/results/calibration_pilot.jsonl``.
+    """
+    import argparse
+
+    import pandas as pd
+    import yaml
+
+    from prism.layers import get_fallback_layer
+    from prism.models import load_model_and_sae
+    from prism.prompts import detection_prompt
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/experiment.yaml")
+    parser.add_argument("--sampled-features", default="data/results/sampled_features.csv")
+    parser.add_argument("--strengths", default="8,16,32,64", help="comma-separated candidate strengths")
+    parser.add_argument("--n-features", type=int, default=5)
+    parser.add_argument("--max-new-tokens", type=int, default=60)
+    parser.add_argument("--output", default="data/results/calibration_pilot.jsonl")
+    args = parser.parse_args()
+
+    with open(args.config, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+
+    loaded = load_model_and_sae(config)
+    sampled = pd.read_csv(args.sampled_features)
+    seed = config.get("features", {}).get("sample_seed", 0)
+    pilot_features = select_pilot_features(sampled, n_features=args.n_features, seed=seed)
+
+    layer = get_fallback_layer(loaded.model.cfg.n_layers)
+    strengths = [float(s) for s in args.strengths.split(",")]
+
+    records = run_calibration_pilot(
+        loaded,
+        pilot_features,
+        strengths,
+        layer=layer,
+        layer_source="adr-0009-fallback",
+        prompt=detection_prompt(),
+        max_new_tokens=args.max_new_tokens,
+    )
+
+    print(summarize_pilot(records))
+    output_path = save_pilot_records(records, args.output)
+    print(f"wrote {len(records)} pilot records to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
