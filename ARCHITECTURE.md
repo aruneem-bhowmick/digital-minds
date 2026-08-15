@@ -302,6 +302,28 @@ Total 760 trials, inside `SPRINT-PLAN.md` §6's ~500–1,000 estimate. Control u
 
 ---
 
+## ADR-0018: REQ-8 resolution — judge model, concept grounding via top-activating context, and the detection/control grading split
+
+**Context:** ADR-0004 accepted "the Anthropic API" as the judge without pinning a model id, deferred to REQ-8 (flagged in `.claude/flagged-decisions.md` #1). Separately, `SPRINT-PLAN.md` §3.5's four-criterion rubric ("affirmative detection, correct concept identification, ... detection prior to verbalizing the concept, and output coherence") assumes a known concept exists per feature to grade naming accuracy against. `data/audit/features.csv` (ADR-0011/ADR-0013) carries no such label — only `identifiability_score`, `decoder_norm`, `activation_frequency` — and neither `sae-bounding` nor this project's own provenance records one anywhere. No earlier ADR anticipated this gap; it surfaced only once `judge.py` needed a real value to compare naming responses against.
+
+**Decision:**
+
+Judge model: `claude-opus-4-8`. Every judge call omits `temperature`/`top_p`/`top_k` (rejected outright on this model) and does not request extended thinking — a rubric-grading task over short transcripts doesn't need it, and skipping it keeps the roughly 760-trial scoring pass inside the token budget `SPRINT-PLAN.md` §6 estimates. `configs/experiment.yaml`'s `judge.model` field, previously `TODO`, is set to this value.
+
+Concept grounding: rather than inventing a per-feature label, `judge.py` derives grounding evidence from the same corpus REQ-2 already measured activation frequency against (`NeelNanda/pile-10k`, ADR-0013's pinned dataset revision). For each feature actually sampled and injected in REQ-6's systematic trials, `models.top_activating_snippets()` finds the token positions where that feature's SAE-encoded value is highest across the corpus and returns the surrounding text window for each. This mirrors how SAE decoder atoms are conventionally interpreted in the auto-interpretability literature — max-activating dataset examples as a feature's de facto identity — and avoids fabricating a label, which CLAUDE.md's non-negotiables rule out outright. The judge receives these snippets as reference evidence and is asked whether the model's naming-turn response plausibly names the same concept, rather than doing an exact-string match against a fixed label. Output: `data/results/feature_concept_grounding.json`, keyed by `feature_id`, carrying the same corpus/model/SAE provenance fields `req2_feature_audit_provenance.json` already uses. A feature that never fires in the corpus — a real, previously-documented outcome (ADR-0013 records 77 of 16,384 features never firing over the full corpus) — gets an empty snippet list; `score_trial()` tells the judge explicitly that no grounding evidence was found, rather than handing over an empty list silently, so a "cannot confirm" grade reads differently from "confirmed wrong."
+
+Grading schema splits by `prompt_type`, following ADR-0017's precedent for the same split in `model_response`'s own shape:
+- `detection`/`baseline` trials (two-turn): `{detected, concept_identified, concept_confidence, identified_before_verbalizing, coherent, reasoning}`. `concept_identified` and `identified_before_verbalizing` are `null` when `detected` is false, since there is no naming turn to grade in that case — the same convention `runner.py` already uses for `model_response["naming"]`.
+- `control` trials (single turn, no concept to name): `{affirmative, coherent, reasoning}`.
+
+Both schemas are enforced via `output_config.format` (structured JSON output), not free-text parsing, so a malformed judge response surfaces as a hard error rather than a silently mis-parsed score.
+
+**Alternatives considered:** A hand-authored concept label per sampled feature (rejected: with 40 sampled features and no existing interpretability artifact for this specific SAE checkpoint, authoring labels by inspection is either slow enough to blow the sprint's remaining budget or shortcut enough to risk being an uninformed guess dressed up as ground truth — worse than grounding in the model's own real firing pattern). A single shared JSON schema across every `prompt_type` with unused fields left `null` (rejected: control trials have no naming turn at all, and Lindsey's four criteria don't apply to them the same way a shared schema implies — leaving fields structurally present but meaningless would require every caller to already know which ones to ignore).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
