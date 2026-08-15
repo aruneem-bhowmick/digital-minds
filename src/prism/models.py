@@ -309,7 +309,15 @@ def top_activating_snippets(
             values = encoded[:, column]
             for token_idx in range(values.shape[0]):
                 value = values[token_idx].item()
-                if value <= 0:
+                if not value > 0:
+                    # Written as "not value > 0" rather than "value <= 0" on
+                    # purpose: NaN comparisons are always False in both
+                    # directions, so "value <= 0" silently lets a NaN
+                    # activation through into the heap (where it would then
+                    # corrupt heap ordering, since comparisons against NaN
+                    # keep returning False there too). "not value > 0" is
+                    # True for NaN, so it's skipped like any other
+                    # non-positive value.
                     continue
                 heap = heaps[fid]
                 entry = (value, doc_idx, token_idx)

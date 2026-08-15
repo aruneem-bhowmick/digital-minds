@@ -343,6 +343,20 @@ def test_top_activating_snippets_rejects_non_positive_k() -> None:
         top_activating_snippets(_fake_loaded_for_snippets(activations), [0], token_batches, k=0)
 
 
+def test_top_activating_snippets_skips_nan_activations() -> None:
+    # NaN fails both "<= 0" and "> 0" comparisons, so a naive non-positive
+    # check lets it slip into the heap and corrupt ordering; only the real
+    # 0.5 value should survive here.
+    nan = float("nan")
+    activations = [torch.tensor([[[nan], [0.5], [nan]]])]
+    token_batches = [torch.arange(3).reshape(1, 3)]
+
+    result = top_activating_snippets(_fake_loaded_for_snippets(activations), [0], token_batches, k=5)
+
+    assert len(result[0]) == 1
+    assert result[0][0]["activation"] == 0.5
+
+
 @pytest.mark.integration
 def test_top_activating_snippets_against_the_real_pair() -> None:
     """Real model/SAE, small prompt set: shapes and value ranges only, the
