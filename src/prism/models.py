@@ -245,6 +245,94 @@ def decoder_norms(loaded: LoadedPrismModel) -> np.ndarray:
     return norms.cpu().numpy()
 
 
+def top_activating_snippets(
+    loaded: LoadedPrismModel,
+    feature_ids: list[int],
+    token_batches: list["torch.Tensor"],
+    *,
+    k: int = 5,
+    context_tokens: int = 8,
+) -> dict[int, list[dict[str, Any]]]:
+    """Return each requested feature's top-K activating context snippets (REQ-8, ADR-0018).
+
+    Rather than a hand-written concept label, this grounds judge.py's
+    naming-accuracy grading in the model's own real firing pattern: for
+    each of ``feature_ids``, scan ``token_batches`` for the token positions
+    where that feature's SAE-encoded value is highest, and return the
+    surrounding ``context_tokens``-token window on each side as text --
+    via the model's own tokenizer, so the snippet is exactly what the
+    model saw, not a separate raw-text lookup that could drift out of
+    alignment with the tokenization actually used to compute activations.
+
+    Only ``feature_ids``' columns are ever materialized. Unlike
+    ``measure_activation_frequencies()``, which needs every feature's rate,
+    this only cares about a handful of REQ-2-sampled features, so there is
+    no reason to encode the full dictionary width per token.
+
+    Nearby positions within the same document can produce overlapping
+    windows; this is accepted rather than deduplicated, since the judge
+    only needs a sense of what the feature fires on, not maximally
+    diverse coverage.
+
+    Returns one entry per requested feature_id, each a list of
+    ``{"activation": float, "snippet": str}`` sorted by activation
+    descending, length at most ``k``. A feature that never fires anywhere
+    in ``token_batches`` gets an empty list -- a real outcome (ADR-0013
+    documents 77 of 16,384 features never firing over the full REQ-2
+    corpus), not an error to guard against.
+    """
+    import heapq
+
+    import torch
+
+    if not feature_ids:
+        raise ValueError("feature_ids must be non-empty")
+    if k <= 0:
+        raise ValueError("k must be positive")
+
+    feature_index = torch.tensor(list(feature_ids), dtype=torch.long)
+    heaps: dict[int, list[tuple[float, int, int]]] = {fid: [] for fid in feature_ids}
+
+    for doc_idx, tokens in enumerate(token_batches):
+        activations: list[torch.Tensor] = []
+
+        def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
+            activations.append(act.detach())
+            return act
+
+        with torch.no_grad():
+            loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
+            acts = activations[0].reshape(-1, activations[0].shape[-1])
+            encoded = loaded.sae.encode(acts)[:, feature_index]  # (seq_len, len(feature_ids))
+
+        for column, fid in enumerate(feature_ids):
+            values = encoded[:, column]
+            for token_idx in range(values.shape[0]):
+                value = values[token_idx].item()
+                if value <= 0:
+                    continue
+                heap = heaps[fid]
+                entry = (value, doc_idx, token_idx)
+                if len(heap) < k:
+                    heapq.heappush(heap, entry)
+                elif value > heap[0][0]:
+                    heapq.heapreplace(heap, entry)
+
+    results: dict[int, list[dict[str, Any]]] = {}
+    for fid in feature_ids:
+        ranked = sorted(heaps[fid], key=lambda entry: entry[0], reverse=True)
+        snippets = []
+        for value, doc_idx, token_idx in ranked:
+            doc_tokens = token_batches[doc_idx]
+            start = max(0, token_idx - context_tokens)
+            end = min(doc_tokens.shape[1], token_idx + context_tokens + 1)
+            snippets.append(
+                {"activation": value, "snippet": loaded.model.to_string(doc_tokens[0, start:end])}
+            )
+        results[fid] = snippets
+    return results
+
+
 def save_reconstruction_result(
     config: dict[str, Any],
     result: dict[str, Any],
