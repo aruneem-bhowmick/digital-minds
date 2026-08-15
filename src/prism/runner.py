@@ -53,6 +53,16 @@ if TYPE_CHECKING:
 DEFAULT_TRIALS_PATH = "data/trials/trials.jsonl"
 DEFAULT_MAX_NEW_TOKENS = 60
 
+# The naming turn's seed is offset from the detection turn's rather than
+# reusing it outright (ADR-0008 wants each configured seed to be an
+# independent draw). A small offset like +1 isn't safe: for a fixed
+# feature/strength, run_systematic_trials() iterates every configured seed
+# in order, so seed N's naming turn and seed (N+1)'s own detection turn
+# would both call torch.manual_seed(N + 1), sharing RNG state between two
+# draws that are supposed to be independent. This offset only needs to stay
+# outside the range any real seed list will ever reach.
+_NAMING_SEED_OFFSET = 1_000_000
+
 _AFFIRMATIVE_RE = re.compile(r"^\W*yes\b", re.IGNORECASE)
 
 
@@ -134,7 +144,7 @@ def run_two_turn_trial(
             hooks_fn(token_start_pos),
             combined_tokens,
             temperature=temperature,
-            seed=seed + 1,
+            seed=seed + _NAMING_SEED_OFFSET,
             max_new_tokens=max_new_tokens,
         )
         naming_response = loaded.model.to_string(naming_output[0, combined_tokens.shape[1] :])
@@ -150,6 +160,7 @@ def run_two_turn_trial(
 def run_control_trial(
     loaded: "LoadedPrismModel",
     hooks: list,
+    tokens: "torch.Tensor",
     control_question: dict[str, Any],
     *,
     seed: int,
@@ -163,8 +174,15 @@ def run_control_trial(
     Unlike ``run_two_turn_trial()``, ``hooks`` is a single already-built hook
     list rather than a factory -- a control trial only ever makes one
     ``generate()`` call, so there is no second call to build a fresh list for.
+
+    ``tokens`` is the caller's own tokenization of ``control_question``, not
+    re-derived here: the caller already tokenized the question once to
+    compute the hook's ``token_start_pos``, and tokenizing it again inside
+    this function would let that position silently drift out of sync with
+    the tensor actually passed to ``generate()`` if the two calls ever
+    stopped agreeing (e.g. one gaining an explicit ``prepend_bos`` while the
+    other kept the default).
     """
-    tokens = loaded.model.to_tokens(control_question["question"])
     output = _generate_turn(loaded, hooks, tokens, temperature=temperature, seed=seed, max_new_tokens=max_new_tokens)
     response = loaded.model.to_string(output[0, tokens.shape[1] :])
     return {
@@ -513,7 +531,7 @@ def run_control_trials(
             hooks = inject_concept(loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos)
 
             model_response = run_control_trial(
-                loaded, hooks, question, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
+                loaded, hooks, tokens, question, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
             )
             record = _build_record(
                 trial_id=trial_id,

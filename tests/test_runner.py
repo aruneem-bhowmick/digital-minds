@@ -14,6 +14,7 @@ import yaml
 
 from prism.runner import (
     DEFAULT_TRIALS_PATH,
+    _NAMING_SEED_OFFSET,
     _append_record,
     _build_record,
     _load_existing_trial_ids,
@@ -277,6 +278,30 @@ def test_run_two_turn_trial_skips_naming_on_a_negative_answer() -> None:
     assert loaded.model._responses == []
 
 
+def test_run_two_turn_trial_naming_seed_never_collides_with_a_sibling_detection_seed(monkeypatch) -> None:
+    # run_systematic_trials() iterates every configured seed for a fixed
+    # feature/strength; seed N's naming turn and seed (N+1)'s own detection
+    # turn must never share RNG state, or the two "independent" seeds
+    # ADR-0008 calls for aren't actually independent.
+    loaded = _fake_loaded(responses=["Yes something feels off", "It is oceans"])
+    seen_seeds = []
+    real_manual_seed = torch.manual_seed
+
+    def spying_manual_seed(seed):
+        seen_seeds.append(seed)
+        return real_manual_seed(seed)
+
+    monkeypatch.setattr(torch, "manual_seed", spying_manual_seed)
+
+    configured_seeds = [0, 1, 2]
+    run_two_turn_trial(loaded, lambda pos: [], seed=configured_seeds[0], temperature=1.0, max_new_tokens=10)
+
+    detection_seed, naming_seed = seen_seeds
+    assert detection_seed == 0
+    assert naming_seed not in configured_seeds
+    assert naming_seed == 0 + _NAMING_SEED_OFFSET
+
+
 def test_run_two_turn_trial_builds_the_naming_continuation_from_token_ids(monkeypatch) -> None:
     # The continuation must be built by concatenating the detection turn's
     # actual output tokens with the naming prompt's tokens, never by
@@ -314,8 +339,9 @@ def test_run_two_turn_trial_builds_the_naming_continuation_from_token_ids(monkey
 def test_run_control_trial_makes_a_single_generation() -> None:
     loaded = _fake_loaded(responses=["No"])
     question = {"id": "ocean_size", "question": "Is the Pacific Ocean smaller than Lake Michigan?", "expected_answer": "no"}
+    tokens = loaded.model.to_tokens(question["question"])
 
-    result = run_control_trial(loaded, [], question, seed=0, temperature=1.0, max_new_tokens=10)
+    result = run_control_trial(loaded, [], tokens, question, seed=0, temperature=1.0, max_new_tokens=10)
 
     assert result["question_id"] == "ocean_size"
     assert result["response"] == "No"
