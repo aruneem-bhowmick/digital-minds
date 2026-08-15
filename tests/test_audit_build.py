@@ -1,4 +1,4 @@
-"""Tests for prism.audit_build — assembling data/audit/features.csv (REQ-2)."""
+"""Tests for prism.audit_build — assembling data/audit/features.csv (REQ-2, issue #17)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import torch
 import prism.audit_build as audit_build
 from prism.models import LoadedPrismModel
 
-_VALID_SOURCE_COMMIT = "deadbeef" * 5  # 40 hex characters, a well-formed (not real) git SHA
 _STUBBED_GIT_COMMIT = "cafef00d" * 5
+_SOURCE_COMMIT = "deadbeef" * 5  # 40 hex characters, a well-formed (not real) git SHA
 
 
 def _fake_loaded(n_features: int) -> LoadedPrismModel:
@@ -26,7 +26,7 @@ def _fake_loaded(n_features: int) -> LoadedPrismModel:
     )
 
 
-def _config() -> dict:
+def _config(*, checksum: str, repo: str = "aruneem-bhowmick/sae-bounding") -> dict:
     return {
         "model": {"name": "test/model", "checkpoint_revision": "abc"},
         "sae": {
@@ -34,6 +34,11 @@ def _config() -> dict:
             "checkpoint_revision": "def",
             "checkpoint_sha256": "0" * 64,
             "hook_name": "blocks.4.hook_resid_pre",
+        },
+        "identifiability_source": {
+            "repo": repo,
+            "commit": _SOURCE_COMMIT,
+            "checksum": checksum,
         },
     }
 
@@ -44,6 +49,11 @@ def _write_identifiability(tmp_path: Path, feature_ids: list[int]) -> Path:
         {"feature_id": feature_ids, "identifiability_score": [0.1 * (i + 1) for i in feature_ids]}
     ).to_csv(path, index=False)
     return path
+
+
+def _config_matching(path: Path, **kwargs: object) -> dict:
+    """A config whose pinned checksum actually matches path's real content."""
+    return _config(checksum=audit_build._sha256(path), **kwargs)
 
 
 def _stub_git_commit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,6 +72,14 @@ def _stub_git_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(audit_build.subprocess, "check_output", _fake_check_output)
 
 
+def test_build_feature_audit_table_rejects_a_checksum_mismatch(tmp_path: Path) -> None:
+    path = _write_identifiability(tmp_path, [0, 1, 2])
+    config = _config(checksum="0" * 64)  # deliberately wrong
+
+    with pytest.raises(ValueError, match="has checksum .* expected"):
+        audit_build.build_feature_audit_table(config, path)
+
+
 def test_build_feature_audit_table_rejects_missing_column(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -70,9 +88,7 @@ def test_build_feature_audit_table_rejects_missing_column(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="missing required column"):
-        audit_build.build_feature_audit_table(
-            _config(), path, identifiability_source_commit=_VALID_SOURCE_COMMIT
-        )
+        audit_build.build_feature_audit_table(_config_matching(path), path)
 
 
 def test_build_feature_audit_table_rejects_row_count_mismatch(
@@ -82,9 +98,7 @@ def test_build_feature_audit_table_rejects_row_count_mismatch(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="rows but the"):
-        audit_build.build_feature_audit_table(
-            _config(), path, identifiability_source_commit=_VALID_SOURCE_COMMIT
-        )
+        audit_build.build_feature_audit_table(_config_matching(path), path)
 
 
 def test_build_feature_audit_table_rejects_non_contiguous_feature_ids(
@@ -97,27 +111,7 @@ def test_build_feature_audit_table_rejects_non_contiguous_feature_ids(
     monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
 
     with pytest.raises(ValueError, match="not exactly 0"):
-        audit_build.build_feature_audit_table(
-            _config(), path, identifiability_source_commit=_VALID_SOURCE_COMMIT
-        )
-
-
-@pytest.mark.parametrize(
-    "commit",
-    [
-        "",
-        "abc123",  # too short
-        "deadbeef" * 5 + "0",  # 41 characters
-        "g" + "deadbeef" * 4 + "dead",  # non-hex character
-    ],
-)
-def test_build_feature_audit_table_rejects_a_malformed_source_commit(
-    tmp_path: Path, commit: str
-) -> None:
-    path = _write_identifiability(tmp_path, [0, 1, 2])
-
-    with pytest.raises(ValueError, match="not a 40-character git commit SHA"):
-        audit_build.build_feature_audit_table(_config(), path, identifiability_source_commit=commit)
+        audit_build.build_feature_audit_table(_config_matching(path), path)
 
 
 def test_build_feature_audit_table_joins_aligned_features_by_index(
@@ -133,9 +127,7 @@ def test_build_feature_audit_table_joins_aligned_features_by_index(
     monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
     _stub_git_commit(monkeypatch)
 
-    table, provenance = audit_build.build_feature_audit_table(
-        _config(), path, identifiability_source_commit=_VALID_SOURCE_COMMIT
-    )
+    table, provenance = audit_build.build_feature_audit_table(_config_matching(path), path)
 
     assert list(table["feature_id"]) == [0, 1, 2]
     np.testing.assert_allclose(table["activation_frequency"], [0.1, 0.2, 0.3])
@@ -153,33 +145,11 @@ def test_build_feature_audit_table_records_source_identity_not_a_local_path(
     )
     monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
     _stub_git_commit(monkeypatch)
+    config = _config_matching(path, repo="someone/sae-bounding-fork")
 
-    _, provenance = audit_build.build_feature_audit_table(
-        _config(),
-        path,
-        identifiability_source_commit=_VALID_SOURCE_COMMIT,
-        identifiability_source_repo="someone/sae-bounding-fork",
-    )
+    _, provenance = audit_build.build_feature_audit_table(config, path)
 
     assert "identifiability_source_csv" not in provenance
     assert provenance["identifiability_source_repo"] == "someone/sae-bounding-fork"
-    assert provenance["identifiability_source_commit"] == _VALID_SOURCE_COMMIT
+    assert provenance["identifiability_source_commit"] == _SOURCE_COMMIT
     assert provenance["identifiability_source_sha256"] == audit_build._sha256(path)
-
-
-def test_build_feature_audit_table_defaults_the_source_repo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = _write_identifiability(tmp_path, [0, 1, 2])
-    monkeypatch.setattr(audit_build, "load_model_and_sae", lambda config, device="cpu": _fake_loaded(3))
-    monkeypatch.setattr(
-        audit_build, "measure_activation_frequencies", lambda loaded, batches: np.array([0.1, 0.2, 0.3])
-    )
-    monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
-    _stub_git_commit(monkeypatch)
-
-    _, provenance = audit_build.build_feature_audit_table(
-        _config(), path, identifiability_source_commit=_VALID_SOURCE_COMMIT
-    )
-
-    assert provenance["identifiability_source_repo"] == audit_build.DEFAULT_IDENTIFIABILITY_SOURCE_REPO

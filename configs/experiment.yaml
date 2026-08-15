@@ -29,6 +29,15 @@ features:
   n_total: 40  # REQ-2 / SPRINT-PLAN.md §3.2: sample size within the 30-50 range the spec calls for
   sample_seed: 0  # REQ-2: fixed seed for stratified_sample() reproducibility
 
+identifiability_source:
+  # REQ-2 / issue #17: per-feature identifiability comes from a separate project
+  # (sae-bounding), merged as of this commit. Pinned the same way the SAE checkpoint
+  # above is -- a commit, not `main`, and a checksum audit_build.py verifies before
+  # trusting the file, not just records after the fact.
+  repo: aruneem-bhowmick/sae-bounding
+  commit: 09cc4a498f57e488befb9dbd4f07c5d30e8dca26
+  checksum: b6ded2c93f829726f4d49ad440c2e1218d016472b43cb6ec383836adf503567a
+
 sampling:
   seeds: [0, 1, 2]  # REQ-6 / ADR-0008: multiple seeds per condition to estimate variance at temperature 1
 

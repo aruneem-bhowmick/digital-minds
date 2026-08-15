@@ -1,14 +1,16 @@
 """Assemble data/audit/features.csv from the identifiability audit and a
-local activation-frequency measurement (REQ-2, ADR-0011, ADR-0013).
+local activation-frequency measurement (REQ-2, ADR-0011, ADR-0013, issue #17).
 
 This is a one-time data-preparation step, not part of the per-run
 experiment pipeline features.py exposes. The per-feature identifiability
-score is produced upstream, in ``sae-bounding``, and read here as a fixed
-input; activation frequency is measured here, over a pinned text corpus,
-using REQ-1's ``load_model_and_sae()``; decoder norm is read directly off
-the loaded SAE's own weights. The three are joined on feature index and
-written to ``data/audit/features.csv``, which everything downstream in
-this project (REQ-2's sampler onward) treats as a static, read-only input.
+score is produced upstream, in ``sae-bounding``, and read here as a fixed,
+checksum-verified input (pinned in ``configs/experiment.yaml``'s
+``identifiability_source:`` block); activation frequency is measured here,
+over a pinned text corpus, using REQ-1's ``load_model_and_sae()``; decoder
+norm is read directly off the loaded SAE's own weights. The three are
+joined on feature index and written to ``data/audit/features.csv``, which
+everything downstream in this project (REQ-2's sampler onward) treats as a
+static, read-only input.
 """
 
 from __future__ import annotations
@@ -39,17 +41,11 @@ DEFAULT_CORPUS_REVISION = "127bfedcd5047750df5ccf3a12979a47bfa0bafa"
 DEFAULT_N_DOCUMENTS = 500
 DEFAULT_MAX_TOKENS_PER_DOCUMENT = 256
 
-# The only upstream repo this project currently reads a per-feature
-# identifiability table from (issue #17 / ADR-0011).
-DEFAULT_IDENTIFIABILITY_SOURCE_REPO = "aruneem-bhowmick/sae-bounding"
-
 
 def build_feature_audit_table(
     config: dict[str, Any],
     identifiability_csv: Path,
     *,
-    identifiability_source_commit: str,
-    identifiability_source_repo: str = DEFAULT_IDENTIFIABILITY_SOURCE_REPO,
     n_documents: int = DEFAULT_N_DOCUMENTS,
     max_tokens_per_document: int = DEFAULT_MAX_TOKENS_PER_DOCUMENT,
     corpus_dataset: str = DEFAULT_CORPUS_DATASET,
@@ -62,22 +58,24 @@ def build_feature_audit_table(
     exactly how it was produced, so the result can be reconstructed from
     logged config alone per CLAUDE.md's reproducibility rule.
 
-    ``identifiability_source_commit`` (the sae-bounding commit that produced
-    ``identifiability_csv``) has no default -- it changes with every
-    regeneration on the sae-bounding side, and guessing it would silently
-    misattribute provenance rather than surface that it wasn't recorded.
-    The CSV's own content is checksummed here regardless, so the provenance
-    record identifies what was actually read, not just where a local
-    (and typically machine-specific) copy of it happened to sit on disk.
+    ``identifiability_csv``'s content is verified against
+    ``config["identifiability_source"]["checksum"]`` before anything else
+    runs (issue #17): a mismatch means the local copy doesn't match the
+    pinned ``sae-bounding`` commit this project has actually validated,
+    whether from staleness, a hand-edit, or the upstream branch having
+    moved since the checksum was pinned. That checksum, plus the repo and
+    commit it came from, are config, not a CLI argument -- the same
+    reproducibility pattern ``configs/experiment.yaml``'s ``sae:`` block
+    already uses for the SAE checkpoint.
     """
-    if len(identifiability_source_commit) != 40 or any(
-        char not in "0123456789abcdef" for char in identifiability_source_commit.lower()
-    ):
+    source_config = config["identifiability_source"]
+    actual_sha256 = _sha256(identifiability_csv)
+    if actual_sha256 != source_config["checksum"]:
         raise ValueError(
-            f"identifiability_source_commit {identifiability_source_commit!r} is not a "
-            "40-character git commit SHA -- this only checks the value is well-formed, "
-            "not that it's the actual commit that produced identifiability_csv (issue #17, "
-            "blocked on sae-bounding PR #6 merging before that can be verified)"
+            f"{identifiability_csv} has checksum {actual_sha256}, expected "
+            f"{source_config['checksum']} (pinned in configs/experiment.yaml against "
+            f"{source_config['repo']}@{source_config['commit']}) -- the local copy doesn't "
+            "match the identifiability audit this project has actually validated"
         )
 
     identifiability = pd.read_csv(identifiability_csv)
@@ -122,9 +120,9 @@ def build_feature_audit_table(
         "sae_checkpoint_revision": config["sae"]["checkpoint_revision"],
         "sae_checkpoint_sha256": config["sae"]["checkpoint_sha256"],
         "hook_name": config["sae"]["hook_name"],
-        "identifiability_source_repo": identifiability_source_repo,
-        "identifiability_source_commit": identifiability_source_commit,
-        "identifiability_source_sha256": _sha256(identifiability_csv),
+        "identifiability_source_repo": source_config["repo"],
+        "identifiability_source_commit": source_config["commit"],
+        "identifiability_source_sha256": actual_sha256,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, cwd=_REPO_ROOT
         ).strip(),
@@ -172,14 +170,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment.yaml")
     parser.add_argument("--identifiability-csv", required=True)
-    parser.add_argument(
-        "--identifiability-source-commit",
-        required=True,
-        help="sae-bounding commit that produced --identifiability-csv (no default; must be stated explicitly)",
-    )
-    parser.add_argument(
-        "--identifiability-source-repo", default=DEFAULT_IDENTIFIABILITY_SOURCE_REPO
-    )
     parser.add_argument("--output", default="data/audit/features.csv")
     parser.add_argument(
         "--provenance-output", default="data/results/req2_feature_audit_provenance.json"
@@ -198,8 +188,6 @@ def main() -> None:
     table, provenance = build_feature_audit_table(
         config,
         Path(args.identifiability_csv),
-        identifiability_source_commit=args.identifiability_source_commit,
-        identifiability_source_repo=args.identifiability_source_repo,
         n_documents=args.n_documents,
         max_tokens_per_document=args.max_tokens_per_document,
         corpus_dataset=args.corpus_dataset,
