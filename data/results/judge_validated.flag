@@ -1,0 +1,6 @@
+{
+  "reviewed_at": "2026-08-15T21:07:28.354603+00:00",
+  "trials_path": "data/trials/trials.jsonl",
+  "sample_size": 15,
+  "reviewer_note": "752/760 trials scored; 8 excluded on judge refusal (category=bio, all false-positive classifier triggers on degenerate text drifting into pharma-adjacent vocabulary such as \"tabacum\" and \"wear-time responses\", not real bio-risk content, not clustered by strength). Reviewed the full 15-trial stratified sample (5 detection, 5 baseline, 5 control) in data/results/judge_validation_sample.md: every detected/coherent grade matches a manual read of the transcript. Additionally checked the one trial (of 752) with detected=true: a garbled response where the runner's first-word regex correctly withheld the naming follow-up, and the judge separately called it detected=true despite its own reasoning noting the affirmative word is not actually first -- a legitimate judge/runner divergence ADR-0017 anticipated, not a bug, but it leaves that one trial with no naming data. Known limitation: zero trials in the current dataset have a real naming turn, so the concept-grounding/naming-accuracy criterion runs correctly end-to-end but is unvalidated against real naming-turn data -- revisit if a later run (recalibrated strength band, or the Gemma Scope stretch) produces one."
+}
