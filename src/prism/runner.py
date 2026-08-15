@@ -1,12 +1,17 @@
-"""Systematic trial runner (REQ-6).
+"""Systematic trial runner plus baseline and control batches (REQ-6, REQ-7).
 
-``run_systematic_trials()`` injects each REQ-2 sampled feature at each REQ-5
-calibrated strength, at every configured seed, and asks
+Three loops share the same underlying trial-record schema and the same
+resumable JSONL file, ``data/trials/trials.jsonl``, distinguished by
+``prompt_type`` (ADR-0005): ``run_systematic_trials()`` (REQ-6) injects each
+REQ-2 sampled feature at each REQ-5 calibrated strength and asks
 ``prompts.detection_prompt()``, following up with
 ``prompts.naming_subtask_prompt()`` only when the model's answer reads as
-affirmative. Every trial is logged as one JSONL record in a shared,
-resumable file, ``data/trials/trials.jsonl`` (ADR-0005), distinguished from
-REQ-7's baseline and control batches by ``prompt_type``.
+affirmative. ``run_baseline_trials()`` (REQ-7) runs the identical two-turn
+protocol with ``inject.no_injection()`` in place of ``inject.inject_concept()``,
+to measure the false-positive rate. ``run_control_trials()`` (REQ-7) keeps the
+injection active but substitutes one of the versioned
+``prompts.unrelated_control_prompt()`` questions for the detection question,
+to check for a generic yes-bias independent of the injected concept.
 
 REQ-10 has not resolved the primary injection layer yet; every trial here
 uses ``layers.get_fallback_layer()`` (ADR-0009's explicit fallback) and
@@ -28,9 +33,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from prism.inject import inject_concept
+from prism.inject import inject_concept, no_injection
 from prism.layers import get_fallback_layer
-from prism.prompts import detection_prompt, naming_subtask_prompt
+from prism.prompts import (
+    DEFAULT_CONTROL_QUESTIONS_PATH,
+    detection_prompt,
+    naming_subtask_prompt,
+    unrelated_control_prompt,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,7 +70,7 @@ def is_affirmative(response_text: str) -> bool:
     return bool(_AFFIRMATIVE_RE.match(response_text.strip()))
 
 
-# --- the two-turn (detection, then conditional naming) protocol ------------
+# --- shared two-turn (detection, then conditional naming) protocol ---------
 
 
 def run_two_turn_trial(
@@ -72,16 +82,15 @@ def run_two_turn_trial(
     max_new_tokens: int,
 ) -> dict[str, Any]:
     """Run one detection trial, following up with the naming question only on
-    an affirmative answer (REQ-6).
+    an affirmative answer (REQ-6, shared with REQ-7's baseline).
 
     ``hooks_fn(token_start_pos)`` builds a fresh TransformerLens hook list for
-    one ``generate()`` call -- ``inject.inject_concept()`` bound to a
-    specific feature/strength here, and (in REQ-7) ``inject.no_injection()``
-    for a baseline trial. It is called once per ``generate()`` call, never
-    reused across calls: ``inject_concept()``'s hook raises if handed a
-    second call's prefill chunk, since a reused hook's internal position
-    counter would already be past where that chunk actually starts (see
-    ``inject.py``).
+    one ``generate()`` call -- either ``inject.inject_concept()`` bound to a
+    specific feature/strength, or ``inject.no_injection()`` for a baseline
+    trial. It is called once per ``generate()`` call, never reused across
+    calls: ``inject_concept()``'s hook raises if handed a second call's
+    prefill chunk, since a reused hook's internal position counter would
+    already be past where that chunk actually starts (see ``inject.py``).
 
     The naming follow-up, when asked, continues from the detection turn's
     *actual generated token IDs*, not a re-tokenization of the pasted-together
@@ -135,6 +144,34 @@ def run_two_turn_trial(
         "detection": {"prompt": detection_text, "response": detection_response},
         "affirmative": affirmative,
         "naming": naming_record,
+    }
+
+
+def run_control_trial(
+    loaded: "LoadedPrismModel",
+    hooks: list,
+    control_question: dict[str, Any],
+    *,
+    seed: int,
+    temperature: float,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    """Run one unrelated-question control trial (REQ-7): a single generation,
+    no naming follow-up, since there is no injected concept for the model to
+    name here by design.
+
+    Unlike ``run_two_turn_trial()``, ``hooks`` is a single already-built hook
+    list rather than a factory -- a control trial only ever makes one
+    ``generate()`` call, so there is no second call to build a fresh list for.
+    """
+    tokens = loaded.model.to_tokens(control_question["question"])
+    output = _generate_turn(loaded, hooks, tokens, temperature=temperature, seed=seed, max_new_tokens=max_new_tokens)
+    response = loaded.model.to_string(output[0, tokens.shape[1] :])
+    return {
+        "question_id": control_question["id"],
+        "question": control_question["question"],
+        "expected_answer": control_question["expected_answer"],
+        "response": response,
     }
 
 
@@ -346,8 +383,164 @@ def run_systematic_trials(
     return {"run": n_run, "skipped": n_skipped}
 
 
+# --- REQ-7: no-injection baseline -------------------------------------------
+
+
+def run_baseline_trials(
+    config: dict[str, Any],
+    loaded: "LoadedPrismModel",
+    sampled_features: "pd.DataFrame",
+    *,
+    trials_path: "str | Path" = DEFAULT_TRIALS_PATH,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+) -> dict[str, int]:
+    """Run the same two-turn protocol as ``run_systematic_trials()`` with
+    ``inject.no_injection()`` in place of an actual injection, to measure the
+    false-positive rate (REQ-7).
+
+    No strength dimension: a no-op hook behaves identically regardless of
+    what strength it would have carried, so sweeping strength here would only
+    duplicate the same no-injection generation under a misleading label.
+    Iterates ``sampled_features`` x ``config["sampling"]["seeds"]`` instead.
+    ``feature_id`` is still recorded on each row -- it names which feature a
+    systematic trial at that same condition would have injected, useful for
+    matching baseline and systematic rows one-to-one -- but carries no causal
+    weight here, since nothing was actually injected.
+    """
+    layer = get_fallback_layer(loaded.model.cfg.n_layers)
+    layer_source = "adr-0009-fallback"
+    seeds = [int(s) for s in config["sampling"]["seeds"]]
+    temperature = float(config["generation"]["temperature_systematic"])
+
+    existing_ids = _load_existing_trial_ids(trials_path)
+    n_run = 0
+    n_skipped = 0
+
+    for _, feature_row in sampled_features.iterrows():
+        feature_id = int(feature_row["feature_id"])
+
+        for seed in seeds:
+            trial_id = _trial_id("baseline", feature_id=feature_id, layer=layer, seed=seed)
+            if trial_id in existing_ids:
+                n_skipped += 1
+                continue
+
+            def hooks_fn(pos: int) -> list:
+                return no_injection(loaded.model, layer=layer, token_start_pos=pos)
+
+            model_response = run_two_turn_trial(
+                loaded, hooks_fn, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
+            )
+            record = _build_record(
+                trial_id=trial_id,
+                feature_id=feature_id,
+                layer=layer,
+                layer_source=layer_source,
+                strength=None,
+                prompt_type="baseline",
+                seed=seed,
+                temperature=temperature,
+                model_response=model_response,
+                config=config,
+            )
+            _append_record(trials_path, record)
+            existing_ids.add(trial_id)
+            n_run += 1
+
+    return {"run": n_run, "skipped": n_skipped}
+
+
+# --- REQ-7: unrelated-question control --------------------------------------
+
+
+def run_control_trials(
+    config: dict[str, Any],
+    loaded: "LoadedPrismModel",
+    sampled_features: "pd.DataFrame",
+    *,
+    control_questions_path: "str | Path" = DEFAULT_CONTROL_QUESTIONS_PATH,
+    trials_path: "str | Path" = DEFAULT_TRIALS_PATH,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+) -> dict[str, int]:
+    """Inject the same feature/strength grid ``run_systematic_trials()``
+    uses, asking one of ``prompts.unrelated_control_prompt()``'s versioned
+    questions instead of the detection question, to check for a generic
+    yes-bias under injection independent of the concept itself (REQ-7).
+
+    Single seed, ``config["sampling"]["seeds"][0]``: this control targets
+    whether injection alone shifts the model toward "yes" on unrelated
+    questions across the strength range, not the trial-to-trial variance a
+    multi-seed sweep would add. Every question in the configured set gets
+    used somewhere across the run: conditions are assigned questions by
+    rotating through the set in a fixed, deterministic order (feature, then
+    strength), so a resumed run assigns the same question to the same
+    condition it would have on a first pass.
+
+    No naming follow-up: control questions have no injected concept to name,
+    so ``run_control_trial()`` makes one generation per trial, not two.
+    """
+    layer = get_fallback_layer(loaded.model.cfg.n_layers)
+    layer_source = "adr-0009-fallback"
+    strengths = [float(s) for s in config["injection"]["strengths"]]
+    seed = int(config["sampling"]["seeds"][0])
+    temperature = float(config["generation"]["temperature_systematic"])
+
+    control_set = unrelated_control_prompt(control_questions_path)
+    questions = control_set["questions"]
+
+    existing_ids = _load_existing_trial_ids(trials_path)
+    n_run = 0
+    n_skipped = 0
+    condition_index = 0
+
+    for _, feature_row in sampled_features.iterrows():
+        feature_id = int(feature_row["feature_id"])
+        decoder_atom = loaded.sae.W_dec[feature_id]
+
+        for strength in strengths:
+            question = questions[condition_index % len(questions)]
+            condition_index += 1
+
+            trial_id = _trial_id(
+                "control", feature_id=feature_id, layer=layer, strength=strength, seed=seed, question_id=question["id"]
+            )
+            if trial_id in existing_ids:
+                n_skipped += 1
+                continue
+
+            tokens = loaded.model.to_tokens(question["question"])
+            token_start_pos = tokens.shape[1] - 1
+            hooks = inject_concept(loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos)
+
+            model_response = run_control_trial(
+                loaded, hooks, question, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
+            )
+            record = _build_record(
+                trial_id=trial_id,
+                feature_id=feature_id,
+                layer=layer,
+                layer_source=layer_source,
+                strength=strength,
+                prompt_type="control",
+                seed=seed,
+                temperature=temperature,
+                model_response=model_response,
+                config=config,
+            )
+            _append_record(trials_path, record)
+            existing_ids.add(trial_id)
+            n_run += 1
+
+    return {"run": n_run, "skipped": n_skipped}
+
+
 def main() -> None:
-    """CLI entry point: ``python -m prism.runner --config configs/experiment.yaml``."""
+    """CLI entry point: ``python -m prism.runner --config configs/experiment.yaml``.
+
+    Runs all three trial types by default; ``--trial-types`` narrows to a
+    comma-separated subset (useful for resuming just one type after a partial
+    run, or for a smoke test that skips the two more expensive loops).
+    """
     import pandas as pd
     import yaml
 
@@ -356,8 +549,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/experiment.yaml")
     parser.add_argument("--sampled-features", default="data/results/sampled_features.csv")
+    parser.add_argument("--control-questions", default=DEFAULT_CONTROL_QUESTIONS_PATH)
     parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument(
+        "--trial-types",
+        default="systematic,baseline,control",
+        help="comma-separated subset of: systematic, baseline, control",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
@@ -369,11 +568,28 @@ def main() -> None:
 
     loaded = load_model_and_sae(config)
     sampled_features = pd.read_csv(args.sampled_features)
+    trial_types = {t.strip() for t in args.trial_types.split(",") if t.strip()}
 
-    result = run_systematic_trials(
-        config, loaded, sampled_features, trials_path=args.trials_path, max_new_tokens=max_new_tokens
-    )
-    print(f"systematic: {result}")
+    if "systematic" in trial_types:
+        result = run_systematic_trials(
+            config, loaded, sampled_features, trials_path=args.trials_path, max_new_tokens=max_new_tokens
+        )
+        print(f"systematic: {result}")
+    if "baseline" in trial_types:
+        result = run_baseline_trials(
+            config, loaded, sampled_features, trials_path=args.trials_path, max_new_tokens=max_new_tokens
+        )
+        print(f"baseline: {result}")
+    if "control" in trial_types:
+        result = run_control_trials(
+            config,
+            loaded,
+            sampled_features,
+            control_questions_path=args.control_questions,
+            trials_path=args.trials_path,
+            max_new_tokens=max_new_tokens,
+        )
+        print(f"control: {result}")
 
 
 if __name__ == "__main__":
