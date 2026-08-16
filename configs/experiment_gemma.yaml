@@ -35,9 +35,12 @@ injection:
                                    # norm at this depth), not a value carried over from Pythia's config
 
 features:
-  n_total: TODO  # REQ-11: sized from the calibration pilot's measured GPU throughput
-                  # (~8.9s/trial on a Modal A10G, data/results/calibration_notes_gemma.md),
-                  # not fixed in advance -- "reduced feature count" per the original scope
+  n_total: 15  # REQ-11 Step 5: sized from the calibration pilot's real ~8.87s/trial
+                # (data/results/calibration_notes_gemma.md) and confirmed with the repo
+                # owner -- 210 total trials (15 features x 4 strengths x 2 seeds
+                # systematic, plus baseline/control), ~31 min of Modal GPU generation
+                # time. A deliberate reduction from Pythia's 40-feature scope, not a
+                # guess -- "reduced feature count" per the original REQ-11 scope.
   sample_seed: 0
 
 identifiability_source:
@@ -52,7 +55,8 @@ identifiability_source:
   checksum: 28312dbe0d64473191944dc0947e6a939ca5335c2fd3dff07eba6e5881e82859
 
 sampling:
-  seeds: TODO  # REQ-11: reduced seed count for compute budget, resolved alongside n_total
+  seeds: [0, 1]  # REQ-11 Step 5: 2 seeds (vs. Pythia's 3) -- reduced alongside n_total for
+                  # the same real, confirmed compute-budget reason
 
 generation:
   temperature_qualitative: 0
