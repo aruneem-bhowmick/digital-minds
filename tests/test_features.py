@@ -388,3 +388,24 @@ def test_check_covariate_balance_requires_tertile_column() -> None:
 
     with pytest.raises(ValueError, match="identifiability_tertile"):
         check_covariate_balance(sampled)
+
+
+# --- against the real Gemma Scope audit table ------------------------------
+
+
+def test_stratified_sample_runs_against_the_real_gemma_audit_table() -> None:
+    """No code changes needed for the Gemma Scope pair (REQ-11 Step 3): the
+    same load/sample/balance-check path REQ-2 built for Pythia's audit table
+    runs unmodified against Gemma's, the actual test of whether the sampler
+    is generic over which SAE checkpoint produced the audit rows.
+    """
+    audit = load_feature_audit("data/audit/features_gemma_scope_2b.csv")
+    assert len(audit) == 16384
+
+    sample = stratified_sample(audit, n_total=39, seed=0)
+    assert len(sample) == 39
+    assert set(sample["identifiability_tertile"]) <= {"low", "medium", "high"}
+
+    balance = check_covariate_balance(sample)
+    assert set(balance["identifiability_tertile"]) == {"low", "medium", "high"}
+    assert (balance["n"] > 0).all()
