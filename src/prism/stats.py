@@ -156,7 +156,20 @@ def _add_detection_target(subset: pd.DataFrame) -> pd.DataFrame:
     naming turns across the dataset (every naming-eligible trial's
     ``judge_concept_identified`` is null), so requiring it would leave the
     target undefined everywhere, not merely rare.
+
+    Raises ``ValueError`` if ``judge_detected`` is missing or contains a
+    null value on a row this function is asked to derive a target for.
+    ADR-0018's structured judge output schema guarantees it is always
+    populated on a scored trial, but that guarantee lives in judge.py's
+    prompt/schema, not in a type system -- a silent break there should
+    not quietly become a wrong boolean here.
     """
+    if "judge_detected" not in subset.columns:
+        raise ValueError("subset is missing the judge_detected column")
+    if subset["judge_detected"].isna().any():
+        bad_ids = subset.loc[subset["judge_detected"].isna(), "trial_id"].tolist()
+        raise ValueError(f"trial(s) with a null judge_detected value: {bad_ids}")
+
     subset = subset.copy()
     subset[DETECTION_TARGET_COLUMN] = subset["judge_detected"].astype(bool)
     return subset
