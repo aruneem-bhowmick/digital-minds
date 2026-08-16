@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import warnings
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import prism.stats as stats_module
 from prism.stats import (
     DETECTION_TARGET_COLUMN,
     JudgeNotValidatedError,
@@ -18,6 +20,7 @@ from prism.stats import (
     build_analysis_table,
     compare_classifiers,
     fit_inference_model,
+    main,
 )
 
 # --- fixtures -----------------------------------------------------------------
@@ -229,6 +232,23 @@ def test_add_detection_target_matches_judge_detected(tmp_path) -> None:
     assert bool(by_trial["detection::f1::s2"]) is False
 
 
+def test_add_detection_target_raises_on_missing_judge_detected_column() -> None:
+    subset = pd.DataFrame({"trial_id": ["t1"], "prompt_type": ["detection"]})
+
+    with pytest.raises(ValueError, match="missing the judge_detected column"):
+        _add_detection_target(subset)
+
+
+def test_add_detection_target_raises_on_null_judge_detected() -> None:
+    # A null judge_detected must not silently become True: bool(float("nan"))
+    # is True in Python, so .astype(bool) on a null cell would count a
+    # missing grade as an affirmative detection if this check didn't exist.
+    subset = pd.DataFrame({"trial_id": ["t1", "t2"], "judge_detected": [True, None]})
+
+    with pytest.raises(ValueError, match=r"null judge_detected value.*\['t2'\]"):
+        _add_detection_target(subset)
+
+
 # --- fit_inference_model --------------------------------------------------------
 
 
@@ -415,6 +435,32 @@ def test_compare_classifiers_no_signal_case_yields_auc_near_half(tmp_path) -> No
     assert (result["auc"].between(0.4, 0.6)).all()
 
 
+def test_compare_classifiers_reports_nan_auc_instead_of_crashing_on_a_single_class(tmp_path) -> None:
+    # scikit-learn's LogisticRegression.fit() raises on a constant target
+    # ("needs samples of at least 2 classes"); a detection subset where
+    # every trial got the same judge_detected grade must not crash the
+    # whole analysis over that.
+    flag_path = _flag(tmp_path)
+    n = 10
+    table = pd.DataFrame(
+        {
+            "trial_id": [f"detection::f{i}::s1" for i in range(n)],
+            "feature_id": range(n),
+            "prompt_type": "detection",
+            "strength": [1.0, 2.0, 4.0, 8.0] * 2 + [1.0, 2.0],
+            "identifiability_score": np.linspace(0.1, 0.95, n),
+            "decoder_norm": np.linspace(0.1, 2.0, n),
+            "activation_frequency": np.linspace(1e-4, 1e-2, n),
+            "judge_detected": [False] * n,
+        }
+    )
+
+    result = compare_classifiers(table, validation_flag_path=flag_path)
+
+    assert result["n_detections"].eq(0).all()
+    assert result["auc"].isna().all()
+
+
 def test_compare_classifiers_uses_the_same_subset_as_fit_inference_model(tmp_path) -> None:
     flag_path = _flag(tmp_path)
     detection = _synthetic_detection_table(n=50)
@@ -425,6 +471,50 @@ def test_compare_classifiers_uses_the_same_subset_as_fit_inference_model(tmp_pat
     result = compare_classifiers(mixed, validation_flag_path=flag_path)
 
     assert (result["n_trials"] == 50).all()
+
+
+# --- main() (CLI) ---------------------------------------------------------------
+
+
+def test_main_writes_all_three_outputs_with_provenance(tmp_path, monkeypatch) -> None:
+    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    analysis_table_path = tmp_path / "analysis_table.csv"
+    regression_results_path = tmp_path / "regression_results.json"
+    auc_comparison_path = tmp_path / "auc_comparison.csv"
+
+    # A real `git rev-parse` is slow and environment-dependent (no git, no
+    # repo, a detached worktree); stubbing it keeps this test fast and
+    # deterministic while still exercising main()'s own provenance wiring.
+    monkeypatch.setattr(stats_module, "_git_commit", lambda: "test-commit-hash")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prism.stats",
+            "--trials-path", str(trials_path),
+            "--audit-path", str(audit_path),
+            "--validation-flag-path", str(flag_path),
+            "--analysis-table-path", str(analysis_table_path),
+            "--regression-results-path", str(regression_results_path),
+            "--auc-comparison-path", str(auc_comparison_path),
+        ],
+    )
+
+    main()
+
+    assert analysis_table_path.exists()
+    assert regression_results_path.exists()
+    assert auc_comparison_path.exists()
+
+    regression_record = json.loads(regression_results_path.read_text(encoding="utf-8"))
+    assert regression_record["git_commit"] == "test-commit-hash"
+    assert regression_record["trials_path"] == str(trials_path)
+    assert "timestamp" in regression_record
+
+    auc_table = pd.read_csv(auc_comparison_path)
+    assert (auc_table["git_commit"] == "test-commit-hash").all()
+    assert (auc_table["trials_path"] == str(trials_path)).all()
+    assert "timestamp" in auc_table.columns
 
 
 # --- N/A: cases ruled out by an upstream guarantee ------------------------------
@@ -451,13 +541,9 @@ def test_na_duplicate_trial_id_in_trials_jsonl() -> None:
     pass
 
 
-# N/A: ADR-0018's structured judge output schema makes `detected` a
-# required field on every scored detection/baseline trial (never null,
-# unlike concept_identified/identified_before_verbalizing, which are
-# conditionally null) -- a non-excluded detection-type row with a missing
-# judge_detected value cannot occur through the normal scoring path.
-@pytest.mark.skip(
-    reason="N/A: ADR-0018's structured output schema always populates judge_detected on a scored trial"
-)
-def test_na_null_judge_detected_on_a_non_excluded_detection_trial() -> None:
-    pass
+# Not N/A after all: ADR-0018's structured judge output schema guarantees
+# `detected` is populated on every scored detection/baseline trial, but
+# that guarantee lives in judge.py's prompt/schema, not in a type system --
+# _add_detection_target() defends this boundary explicitly rather than
+# trusting it silently. See test_add_detection_target_raises_on_null_judge_detected
+# above for the real coverage.
