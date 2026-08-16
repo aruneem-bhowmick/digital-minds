@@ -34,9 +34,11 @@ if TYPE_CHECKING:
     import torch
 
 # Fixed corpus for REQ-1's reconstruction-quality check (validate_reconstruction).
-# Tokenizes to exactly 120 tokens under this model's tokenizer -- kept as one
-# canonical list so the test and any future run reference the same corpus,
-# rather than each defining its own ad hoc prompts.
+# Token count under validate_reconstruction() (which excludes each prompt's
+# BOS token, ADR-0022) is model/tokenizer-specific, not a fixed number this
+# corpus guarantees -- kept as one canonical list so the test and any future
+# run reference the same prompts, rather than each defining its own ad hoc
+# set. See tests/test_models.py for the actual measured counts per model.
 RECONSTRUCTION_VALIDATION_PROMPTS = [
     "The quick brown fox jumps over the lazy dog.",
     "In 1969, astronauts landed on the surface of the Moon for the first time.",
@@ -218,23 +220,37 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
     fraction of variance explained, per REQ-1's definition of done: reconstruction
     quality is reported, not assumed, regardless of which ADR-0002 branch was taken.
 
-    Excludes each prompt's first token (BOS) from the reported metric.
-    REQ-11's real Gemma run found this token's activation norm running
-    roughly 8-9x every other token's at layer 20 -- a documented
-    attention-sink outlier, not a reconstruction failure -- which alone
-    was enough to drag a per-token fraction-variance-explained deeply
-    negative even though every other token reconstructed well (0.63
-    excluding it, versus catastrophically negative including it). This is
-    the same convention published SAE evaluations use, not a Gemma-specific
-    carve-out: excluding it is the correct read for either model, and
-    ADR-0022 records the real before/after numbers for both rather than
-    changing this silently.
+    Excludes each prompt's first token from the reported metric, on the
+    assumption (true for both models' default ``to_tokens()`` behavior
+    today) that ``to_tokens()`` prepends BOS. REQ-11's real Gemma run found
+    that token's activation norm running roughly 8-9x every other token's
+    at layer 20 -- a documented attention-sink outlier, not a
+    reconstruction failure -- which alone was enough to drag a per-token
+    fraction-variance-explained deeply negative even though every other
+    token reconstructed well (0.63 excluding it, versus catastrophically
+    negative including it). Published SAE evaluations commonly exclude
+    this same token for the same reason; this is a positional exclusion of
+    "whatever ``to_tokens()`` put at index 0," not a magnitude-based
+    outlier detector, so it stops being correct if a future caller passes
+    prompts tokenized with ``prepend_bos=False``. ADR-0022 records the
+    real before/after numbers for both models this project uses today,
+    rather than changing this silently.
+
+    Raises ``ValueError`` if excluding that token leaves a prompt with no
+    tokens at all (i.e. the prompt tokenized to length 1) -- silently
+    contributing zero rows for a degenerate prompt would be a more
+    confusing failure than an explicit one.
     """
     import torch
 
     activations: list[torch.Tensor] = []
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
+        if act.shape[1] < 2:
+            raise ValueError(
+                f"a prompt tokenized to length {act.shape[1]}, too short to exclude a "
+                "BOS token from -- pass a longer prompt"
+            )
         activations.append(act.detach()[:, 1:, :])
         return act
 
@@ -286,6 +302,14 @@ def measure_activation_frequencies(
     larger corpus without chunking risks an OOM). The result is
     mathematically identical to a single unchunked pass; only peak memory
     differs.
+
+    Excludes each document's first token (BOS) from the count, same
+    reasoning as ``validate_reconstruction()`` (ADR-0022): that position's
+    activation is a documented outlier at some hook points, and counting
+    it as "the feature fired" would inflate every feature's reported rate
+    by whatever fraction of the corpus's tokens are BOS positions. The
+    model still sees BOS as real context for every other token in the
+    document -- only its own position is excluded from the count.
     """
     import torch
 
@@ -296,13 +320,18 @@ def measure_activation_frequencies(
     total_tokens = 0
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
-        activations.append(act.detach())
+        activations.append(act.detach()[:, 1:, :])
         return act
 
     for start in range(0, len(token_batches), chunk_size):
         activations: list[torch.Tensor] = []
         with torch.no_grad():
             for tokens in token_batches[start : start + chunk_size]:
+                if tokens.shape[1] < 2:
+                    raise ValueError(
+                        f"a document tokenized to length {tokens.shape[1]}, too short to "
+                        "exclude a BOS token from -- drop it from the corpus"
+                    )
                 loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
 
             acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
@@ -360,6 +389,11 @@ def top_activating_snippets(
     only needs a sense of what the feature fires on, not maximally
     diverse coverage.
 
+    Each document's first token (BOS) is never a candidate snippet (ADR-0022):
+    a documented activation-norm outlier at some hook points, not evidence
+    of what the feature actually detects. It still contributes as context
+    for every later token's own activation.
+
     Returns one entry per requested feature_id, each a list of
     ``{"activation": float, "snippet": str}`` sorted by activation
     descending, length at most ``k``. A feature that never fires anywhere
@@ -407,6 +441,14 @@ def top_activating_snippets(
         for column, fid in enumerate(feature_ids):
             values = encoded[:, column]
             for token_idx in range(values.shape[0]):
+                if token_idx == 0:
+                    # BOS position (ADR-0022): a documented activation-norm
+                    # outlier at some hook points, not evidence of what this
+                    # feature actually detects. Skipped as a candidate here
+                    # rather than sliced out of `acts` above, since token_idx
+                    # has to stay aligned with doc_tokens's own indexing for
+                    # the snippet-window extraction below.
+                    continue
                 value = values[token_idx].item()
                 if not value > 0:
                     # Written as "not value > 0" rather than "value <= 0" on
