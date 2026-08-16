@@ -116,7 +116,7 @@ def build_analysis_table(
 
     audit = load_feature_audit(audit_path)
     merged = trials.merge(audit, on="feature_id", how="left", validate="many_to_one")
-    unmatched = sorted(merged.loc[merged["identifiability_score"].isna(), "feature_id"].unique())
+    unmatched = sorted(int(fid) for fid in merged.loc[merged["identifiability_score"].isna(), "feature_id"].unique())
     if unmatched:
         raise ValueError(
             f"{trials_path} has trial(s) for feature_id(s) {unmatched} with no "
@@ -198,6 +198,26 @@ def fit_inference_model(
     x_raw = subset[covariates].astype(float)
     x_mean = x_raw.mean()
     x_std = x_raw.std(ddof=0)
+    standardization = {name: {"mean": float(x_mean[name]), "std": float(x_std[name])} for name in covariates}
+
+    zero_variance = [name for name in covariates if x_std[name] == 0]
+    if zero_variance:
+        # Standardizing would divide by zero and hand statsmodels a NaN/inf
+        # design matrix -- which raises whichever internal exception happens
+        # to fire first (MissingDataError, LinAlgError, ...) with a message
+        # that doesn't say why. A constant covariate in this trial subset is
+        # itself the reportable finding: there's no variation for the fit to
+        # attribute an effect to.
+        return {
+            "n_trials": n_trials,
+            "n_detections": n_detections,
+            "covariates": covariates,
+            "standardization": standardization,
+            "converged": False,
+            "convergence_note": f"covariate(s) {zero_variance} have zero variance in this trial subset",
+            "coefficients": {},
+        }
+
     x_standardized = (x_raw - x_mean) / x_std
     x_design = sm.add_constant(x_standardized, has_constant="add")
     y = subset[DETECTION_TARGET_COLUMN].astype(int)
@@ -224,9 +244,7 @@ def fit_inference_model(
         "n_trials": n_trials,
         "n_detections": n_detections,
         "covariates": covariates,
-        "standardization": {
-            name: {"mean": float(x_mean[name]), "std": float(x_std[name])} for name in covariates
-        },
+        "standardization": standardization,
         "converged": converged,
         "convergence_note": convergence_note,
         "coefficients": coefficients,
