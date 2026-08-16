@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import modal
 from dotenv import dotenv_values
@@ -117,11 +117,21 @@ def _upload(sandbox: modal.Sandbox, local_path: Path, repo_relative_path: str) -
     inputs the remote command needs but this repo doesn't track (e.g.
     sae-bounding's per-feature identifiability CSV, gitignored there).
 
+    Rejects an absolute path or one containing a ".." component: this
+    project's own CLI is the only caller today, but the destination string
+    still shouldn't be able to write outside REPO_DIR if that ever changes.
+
     Creates the destination's parent directory first, mirroring _download()'s
     local-side mkdir(parents=True, exist_ok=True) -- a fresh git clone won't
     contain an untracked or gitignored destination directory on its own.
     """
-    remote_path = f"{REPO_DIR}/{repo_relative_path}"
+    relative = PurePosixPath(repo_relative_path)
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(
+            f"upload destination {repo_relative_path!r} must be a non-empty, "
+            "repository-relative path with no '..' components"
+        )
+    remote_path = f"{REPO_DIR}/{relative.as_posix()}"
     remote_parent = remote_path.rsplit("/", 1)[0]
     sandbox.filesystem.make_directory(remote_parent, create_parents=True)
     sandbox.filesystem.copy_from_local(local_path, remote_path)
