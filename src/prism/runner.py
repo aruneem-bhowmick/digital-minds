@@ -379,7 +379,9 @@ def run_systematic_trials(
                     continue
 
                 def hooks_fn(pos: int, _atom: Any = decoder_atom, _strength: float = strength) -> list:
-                    return inject_concept(loaded.model, _atom, layer=layer, strength=_strength, token_start_pos=pos)
+                    return inject_concept(
+                        loaded.model, _atom, hook_name=loaded.hook_name, strength=_strength, token_start_pos=pos
+                    )
 
                 model_response = run_two_turn_trial(
                     loaded, hooks_fn, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
@@ -445,7 +447,7 @@ def run_baseline_trials(
                 continue
 
             def hooks_fn(pos: int) -> list:
-                return no_injection(loaded.model, layer=layer, token_start_pos=pos)
+                return no_injection(loaded.model, hook_name=loaded.hook_name, token_start_pos=pos)
 
             model_response = run_two_turn_trial(
                 loaded, hooks_fn, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
@@ -528,7 +530,9 @@ def run_control_trials(
 
             tokens = loaded.model.to_tokens(question["question"])
             token_start_pos = tokens.shape[1] - 1
-            hooks = inject_concept(loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos)
+            hooks = inject_concept(
+                loaded.model, decoder_atom, hook_name=loaded.hook_name, strength=strength, token_start_pos=token_start_pos
+            )
 
             model_response = run_control_trial(
                 loaded, hooks, tokens, question, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
