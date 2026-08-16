@@ -13,9 +13,18 @@ calibration pilot calls this now, since it needs some layer to inject into
 and REQ-10 hasn't run yet -- ADR-0009 names this an explicit fallback, not
 an approximation of the geometry-grounded choice, so callers should record
 which one they used rather than letting the two blur together.
+
+``resolve_injection_layer()`` is the single place ``inject.py`` and
+``runner.py`` should call to pick between the two: REQ-11's Gemma Scope
+config pins ``injection.layer`` to the SAE checkpoint's own trained layer
+(20) rather than leaving it ``TODO``, and every caller needs to honor that
+instead of always computing the ADR-0009 fallback regardless of what the
+config says.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 DEFAULT_FALLBACK_FRACTION = 2 / 3
 
@@ -36,3 +45,24 @@ def get_fallback_layer(n_layers: int, fraction: float = DEFAULT_FALLBACK_FRACTIO
 
     layer = round(n_layers * fraction)
     return min(layer, n_layers - 1)
+
+
+def resolve_injection_layer(config: dict[str, Any], n_layers: int) -> tuple[int, str]:
+    """Return ``(layer, layer_source)`` for a trial run, honoring an explicit
+    ``config["injection"]["layer"]`` before falling back to ADR-0009.
+
+    ``configs/experiment.yaml``'s Pythia config leaves ``injection.layer`` as
+    the literal string ``"TODO"`` (REQ-10 hasn't resolved it), and some test
+    fixtures omit the key entirely -- both cases fall back the same way, so
+    every call against an unresolved config still gets the ADR-0009
+    fractional-depth fallback, exactly as before this function existed.
+    ``configs/experiment_gemma.yaml`` pins ``injection.layer: 20`` -- the
+    Gemma Scope SAE's own trained layer, a constraint from which checkpoint
+    exists, not a resolved REQ-10 choice -- and callers need to use that
+    value rather than silently recomputing an ADR-0009 fallback that doesn't
+    match the SAE's own hook point.
+    """
+    layer = config.get("injection", {}).get("layer")
+    if layer is None or isinstance(layer, str):
+        return get_fallback_layer(n_layers), "adr-0009-fallback"
+    return int(layer), "sae-checkpoint-layer"
