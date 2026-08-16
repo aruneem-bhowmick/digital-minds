@@ -360,6 +360,20 @@ Run against the real dataset (474 `detection`-type trials, 1 graded `judge_detec
 
 ---
 
+## ADR-0022: REQ-11 finding — validate_reconstruction() excludes the BOS token
+
+**Context:** REQ-11's first real reconstruction check against the Gemma Scope pair (`layer_20/width_16k`, Gemma-2-2b) reported `fraction_variance_explained` around -90 to -98 across several L0 variants tested (`average_l0_22`, `average_l0_71`, `average_l0_139`) and both the raw and "canonical" SAELens releases — a catastrophic result inconsistent with SAELens's own registry, which records `expected_var_explained: 1.0` for these checkpoints. Ruled out, in order, before finding the real cause: the SAE-loading path (`HookedTransformer` vs. `TransformerBridge` vs. raw `transformers.AutoModelForCausalLM` with a manual forward hook all produced numerically identical activations and identical reconstruction failure), float32 vs. bfloat16 precision (identical), and the specific checkpoint choice (every L0 variant tested failed, in decreasing severity as L0 increased, never reaching positive territory even at the least-sparse variant tested).
+
+Inspecting per-token activation norms directly found the actual cause: the first token of the tokenized prompt (Gemma's `<bos>`) had an activation norm of `2892.6` at layer 20, roughly 8-9x every other token's (`294`-`397`). This single token's reconstruction error was large enough on its own to make the aggregate `fraction_variance_explained` deeply negative, even though every other token's reconstruction was reasonable (`0.63` computed over the same prompt with only the BOS token excluded). This is a documented phenomenon in SAE literature (an "attention sink" or BOS-outlier effect), not a bug in the SAE, the model-loading path, or `sae_lens`.
+
+**Decision:** `validate_reconstruction()` (`models.py`, REQ-1) excludes each prompt's first token from the reported `fraction_variance_explained` and `n_tokens`, for both models this project uses, not a Gemma-specific branch. Re-running Pythia-70m-deduped's own validation with the fix: `fraction_variance_explained` moves from `0.9808` (all 120 tokens) to `0.9782` (112 tokens, BOS excluded) — the same effect is present on Pythia too, just far less severe, and the change is recorded plainly rather than quietly keeping the more flattering pre-fix number. `RECONSTRUCTION_VALIDATION_PROMPTS` and `save_reconstruction_result()` are unchanged; only which tokens count toward the metric changes.
+
+**Alternatives considered:** Treating the negative Gemma result as a real reconstruction failure and reporting REQ-11 as blocked on a bad checkpoint (rejected — the per-token breakdown shows the SAE reconstructs ordinary tokens well; reporting the aggregate metric as-is would misrepresent a metric artifact as a substantive finding). Adding a Gemma-only exclusion flag to `validate_reconstruction()` rather than changing the shared function's default behavior (rejected — the BOS-outlier effect is present on Pythia too, just smaller, and CLAUDE.md's rule against model-specific branching in shared code applies to evaluation code the same way it applies to the loading path REQ-11's own instructions call out).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
