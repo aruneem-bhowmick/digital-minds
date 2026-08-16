@@ -102,9 +102,9 @@ def build_analysis_table(
     trials = pd.DataFrame.from_records(records)
 
     excluded = trials["excluded"]
-    pending = trials.loc[~excluded, "judge_scores"].isna()
-    if pending.any():
-        bad_ids = trials.loc[(~excluded) & trials["judge_scores"].isna(), "trial_id"].tolist()
+    unscored = (~excluded) & trials["judge_scores"].isna()
+    if unscored.any():
+        bad_ids = trials.loc[unscored, "trial_id"].tolist()
         raise ValueError(
             f"{trials_path} has non-excluded trial(s) with no judge_scores yet: "
             f"{bad_ids}. Run judge.score_all_pending() first."
@@ -115,15 +115,15 @@ def build_analysis_table(
     trials = pd.concat([trials.drop(columns=["judge_scores", "model_response"]), judge_columns], axis=1)
 
     audit = load_feature_audit(audit_path)
-    merged = trials.merge(audit, on="feature_id", how="left", validate="many_to_one")
-    unmatched = sorted(int(fid) for fid in merged.loc[merged["identifiability_score"].isna(), "feature_id"].unique())
+    merged = trials.merge(audit, on="feature_id", how="left", validate="many_to_one", indicator=True)
+    unmatched = sorted(int(fid) for fid in merged.loc[merged["_merge"] == "left_only", "feature_id"].unique())
     if unmatched:
         raise ValueError(
             f"{trials_path} has trial(s) for feature_id(s) {unmatched} with no "
             f"match in {audit_path} -- the audit table may be stale relative to "
             "the sampled features"
         )
-    return merged
+    return merged.drop(columns=["_merge"])
 
 
 def _detection_subset(trials_df: pd.DataFrame) -> pd.DataFrame:
