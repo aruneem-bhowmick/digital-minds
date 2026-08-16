@@ -1,0 +1,12 @@
+{
+  "model_name": "google/gemma-2-2b",
+  "model_checkpoint_revision": "c5ebcd40d208330abc697524c919956e692655cf",
+  "sae_checkpoint_repo": "google/gemma-scope-2b-pt-res",
+  "sae_checkpoint_revision": "fd571b47c1c64851e9b1989792367b9babb4af63",
+  "sae_checkpoint_sha256": "579081b71d611ae6a2df57d865606ab2df2b36cc5db5d0b0566f6e5b42b9b2fb",
+  "hook_name": "blocks.20.hook_resid_post",
+  "git_commit": "fa1d8ea47a665530d0017749a55aa49751c2f809",
+  "timestamp": "2026-08-16T17:21:30.971625+00:00",
+  "n_tokens": 121,
+  "fraction_variance_explained": 0.6786123514175415
+}

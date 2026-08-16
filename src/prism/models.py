@@ -1,10 +1,21 @@
-"""Model + SAE loading (REQ-1, REQ-2).
+"""Model + SAE loading (REQ-1, REQ-2, REQ-11).
 
 REQ-1 / ADR-0010: the SAE dependency resolves to an existing checkpoint, not
 a trained-from-scratch fallback. ``load_model_and_sae`` loads Pythia-70m-deduped
 through TransformerLens and pairs it with the exact residual-stream SAE the
 frame-theoretic identifiability audit already scored (Hugging Face
 ``ghidav/pythia-70m-deduped-sae``, layer 4, ``blocks.4.hook_resid_pre``).
+
+REQ-11: the same function also loads Gemma-2-2b paired with a Gemma Scope
+residual-stream SAE, selected by ``config["sae"]["loader"]`` rather than
+inferred from other fields -- Gemma Scope's ``.npz`` checkpoints need a
+different download-and-construct path than Pythia's safetensors-plus-cfg.json
+layout, so this is a second explicit branch, not a special case threaded
+through the existing one. Everything downstream of ``LoadedPrismModel``
+(``_validate_pairing``, ``measure_activation_frequencies``, ``decoder_norms``,
+``top_activating_snippets``, ``validate_reconstruction``) is unmodified and
+works against either model, since both loading paths return the same
+``sae_lens.SAE`` interface.
 """
 
 from __future__ import annotations
@@ -23,9 +34,11 @@ if TYPE_CHECKING:
     import torch
 
 # Fixed corpus for REQ-1's reconstruction-quality check (validate_reconstruction).
-# Tokenizes to exactly 120 tokens under this model's tokenizer -- kept as one
-# canonical list so the test and any future run reference the same corpus,
-# rather than each defining its own ad hoc prompts.
+# Token count under validate_reconstruction() (which excludes each prompt's
+# BOS token, ADR-0022) is model/tokenizer-specific, not a fixed number this
+# corpus guarantees -- kept as one canonical list so the test and any future
+# run reference the same prompts, rather than each defining its own ad hoc
+# set. See tests/test_models.py for the actual measured counts per model.
 RECONSTRUCTION_VALIDATION_PROMPTS = [
     "The quick brown fox jumps over the lazy dog.",
     "In 1969, astronauts landed on the surface of the Moon for the first time.",
@@ -55,16 +68,30 @@ def load_model_and_sae(config: dict[str, Any], device: str = "cpu") -> LoadedPri
     configured hook name doesn't exist on the loaded model or doesn't match
     the hook the SAE was trained against -- a wrong-layer config error
     should surface here, not several modules downstream during injection.
+
+    ``config["sae"]["loader"]`` picks which SAE-loading path runs
+    (``"hf_safetensors"``, the default, for Pythia's checkpoint layout;
+    ``"gemma_scope_npz"`` for REQ-11's Gemma Scope checkpoint). Checked
+    before touching the network, so an unrecognized value fails immediately
+    rather than after downloading the base model.
     """
+    sae_cfg = config["sae"]
+    hook_name = sae_cfg["hook_name"]
+    loader = sae_cfg.get("loader", "hf_safetensors")
+    if loader not in ("hf_safetensors", "gemma_scope_npz"):
+        raise ValueError(
+            f"unrecognized sae.loader {loader!r}; expected 'hf_safetensors' or 'gemma_scope_npz'"
+        )
+
     model_name = config["model"]["name"]
     model_revision = config["model"]["checkpoint_revision"]
     model = HookedTransformer.from_pretrained(model_name, revision=model_revision, device=device)
 
-    sae_cfg = config["sae"]
-    hook_name = sae_cfg["hook_name"]
-
-    checkpoint_dir = _download_sae_checkpoint(sae_cfg)
-    sae = SAE.load_from_disk(checkpoint_dir, device=device)
+    if loader == "hf_safetensors":
+        checkpoint_dir = _download_sae_checkpoint(sae_cfg)
+        sae = SAE.load_from_disk(checkpoint_dir, device=device)
+    else:
+        sae = _load_gemma_scope_sae(sae_cfg, device=device)
 
     _validate_pairing(model, sae, hook_name, model_name=model_name)
 
@@ -130,6 +157,55 @@ def _download_sae_checkpoint(sae_cfg: dict[str, Any]) -> Path:
     return weights_path.parent
 
 
+def _load_gemma_scope_sae(sae_cfg: dict[str, Any], device: str) -> SAE:
+    """Download, checksum-verify, and load a Gemma Scope SAE (REQ-11).
+
+    Gemma Scope ships ``.npz`` checkpoints -- a different format than the
+    safetensors-plus-``cfg.json`` layout ``_download_sae_checkpoint`` reads
+    for the Pythia checkpoint, so this is a second loading path rather than
+    a branch inside that one.
+
+    ``sae_lens.SAE.from_pretrained()`` has no ``revision`` parameter at
+    all -- it resolves ``release``/``sae_id`` through its own registry with
+    no way for a caller to pin which commit of ``checkpoint_repo`` that
+    resolves to. Downloading and checksumming the file ourselves first
+    (matching ``_download_sae_checkpoint``'s pattern) only proves the
+    checksum passes on *a* download; it doesn't prove ``from_pretrained()``
+    actually loaded those same bytes. So this also compares the two
+    decoder matrices directly after loading, and raises if they don't
+    match -- a real, enforced guarantee instead of an assumption the
+    docstring used to state without checking it.
+    """
+    import numpy as np
+    import torch
+
+    downloaded = Path(
+        hf_hub_download(
+            repo_id=sae_cfg["checkpoint_repo"],
+            filename=sae_cfg["checkpoint_filename"],
+            revision=sae_cfg["checkpoint_revision"],
+        )
+    )
+    _verify_sha256(downloaded, sae_cfg["checkpoint_sha256"])
+    with np.load(downloaded) as archive:
+        checksummed_w_dec = archive["W_dec"]
+
+    sae = SAE.from_pretrained(
+        release=sae_cfg["sae_lens_release"],
+        sae_id=sae_cfg["sae_lens_sae_id"],
+        device=device,
+    )
+    loaded_w_dec = sae.W_dec.detach().to(torch.float32).cpu().numpy()
+    if not np.allclose(loaded_w_dec, checksummed_w_dec.astype(np.float32), atol=1e-6):
+        raise ValueError(
+            f"SAE.from_pretrained(release={sae_cfg['sae_lens_release']!r}, "
+            f"sae_id={sae_cfg['sae_lens_sae_id']!r}) loaded a decoder matrix that does "
+            f"not match the checksum-verified {downloaded} -- sae_lens resolved this "
+            "release/sae_id to different weights than the pinned checkpoint_revision"
+        )
+    return sae
+
+
 def _verify_sha256(path: Path, expected: str) -> None:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     if digest != expected:
@@ -143,13 +219,39 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
     """Encode/decode real residual-stream activations through the SAE and report
     fraction of variance explained, per REQ-1's definition of done: reconstruction
     quality is reported, not assumed, regardless of which ADR-0002 branch was taken.
+
+    Excludes each prompt's first token from the reported metric, on the
+    assumption (true for both models' default ``to_tokens()`` behavior
+    today) that ``to_tokens()`` prepends BOS. REQ-11's real Gemma run found
+    that token's activation norm running roughly 8-9x every other token's
+    at layer 20 -- a documented attention-sink outlier, not a
+    reconstruction failure -- which alone was enough to drag a per-token
+    fraction-variance-explained deeply negative even though every other
+    token reconstructed well (0.63 excluding it, versus catastrophically
+    negative including it). Published SAE evaluations commonly exclude
+    this same token for the same reason; this is a positional exclusion of
+    "whatever ``to_tokens()`` put at index 0," not a magnitude-based
+    outlier detector, so it stops being correct if a future caller passes
+    prompts tokenized with ``prepend_bos=False``. ADR-0022 records the
+    real before/after numbers for both models this project uses today,
+    rather than changing this silently.
+
+    Raises ``ValueError`` if excluding that token leaves a prompt with no
+    tokens at all (i.e. the prompt tokenized to length 1) -- silently
+    contributing zero rows for a degenerate prompt would be a more
+    confusing failure than an explicit one.
     """
     import torch
 
     activations: list[torch.Tensor] = []
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
-        activations.append(act.detach())
+        if act.shape[1] < 2:
+            raise ValueError(
+                f"a prompt tokenized to length {act.shape[1]}, too short to exclude a "
+                "BOS token from -- pass a longer prompt"
+            )
+        activations.append(act.detach()[:, 1:, :])
         return act
 
     for prompt in prompts:
@@ -200,6 +302,14 @@ def measure_activation_frequencies(
     larger corpus without chunking risks an OOM). The result is
     mathematically identical to a single unchunked pass; only peak memory
     differs.
+
+    Excludes each document's first token (BOS) from the count, same
+    reasoning as ``validate_reconstruction()`` (ADR-0022): that position's
+    activation is a documented outlier at some hook points, and counting
+    it as "the feature fired" would inflate every feature's reported rate
+    by whatever fraction of the corpus's tokens are BOS positions. The
+    model still sees BOS as real context for every other token in the
+    document -- only its own position is excluded from the count.
     """
     import torch
 
@@ -210,13 +320,18 @@ def measure_activation_frequencies(
     total_tokens = 0
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
-        activations.append(act.detach())
+        activations.append(act.detach()[:, 1:, :])
         return act
 
     for start in range(0, len(token_batches), chunk_size):
         activations: list[torch.Tensor] = []
         with torch.no_grad():
             for tokens in token_batches[start : start + chunk_size]:
+                if tokens.shape[1] < 2:
+                    raise ValueError(
+                        f"a document tokenized to length {tokens.shape[1]}, too short to "
+                        "exclude a BOS token from -- drop it from the corpus"
+                    )
                 loaded.model.run_with_hooks(tokens, fwd_hooks=[(loaded.hook_name, _capture)])
 
             acts = torch.cat([a.reshape(-1, a.shape[-1]) for a in activations], dim=0)
@@ -274,6 +389,11 @@ def top_activating_snippets(
     only needs a sense of what the feature fires on, not maximally
     diverse coverage.
 
+    Each document's first token (BOS) is never a candidate snippet (ADR-0022):
+    a documented activation-norm outlier at some hook points, not evidence
+    of what the feature actually detects. It still contributes as context
+    for every later token's own activation.
+
     Returns one entry per requested feature_id, each a list of
     ``{"activation": float, "snippet": str}`` sorted by activation
     descending, length at most ``k``. A feature that never fires anywhere
@@ -321,6 +441,14 @@ def top_activating_snippets(
         for column, fid in enumerate(feature_ids):
             values = encoded[:, column]
             for token_idx in range(values.shape[0]):
+                if token_idx == 0:
+                    # BOS position (ADR-0022): a documented activation-norm
+                    # outlier at some hook points, not evidence of what this
+                    # feature actually detects. Skipped as a candidate here
+                    # rather than sliced out of `acts` above, since token_idx
+                    # has to stay aligned with doc_tokens's own indexing for
+                    # the snippet-window extraction below.
+                    continue
                 value = values[token_idx].item()
                 if not value > 0:
                     # Written as "not value > 0" rather than "value <= 0" on
