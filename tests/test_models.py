@@ -199,12 +199,72 @@ def test_load_model_and_sae_returns_a_working_gemma_pair() -> None:
     # is one canonical corpus shared across models; a fixed token count was
     # never part of that contract.
     assert result["n_tokens"] == 121
-    assert 0.0 <= result["fraction_variance_explained"] <= 1.0
+    # Measured 0.6786 on this checkpoint (the sparsest available L0 variant
+    # at this layer, chosen in REQ-11 Step 1 to match the audit's sparsity
+    # convention rather than for reconstruction quality -- real and lower
+    # than Pythia's, not a bug). Floor set below that with margin, not an
+    # unguaranteed [0, 1] bound: the formula can go negative on a genuinely
+    # bad fit, and a floor should say so rather than silently accept one.
+    assert result["fraction_variance_explained"] >= 0.5
 
     output_path = save_reconstruction_result(
         config, result, output_path=Path("data/results/req1_gemma_sae_validation.json")
     )
     assert output_path.exists()
+
+
+# --- validate_reconstruction: BOS exclusion (ADR-0022) ---------------------
+
+
+def _fake_loaded_for_reconstruction(token_lengths: list[int], d_model: int = 3) -> LoadedPrismModel:
+    """A LoadedPrismModel whose fake model returns a deterministic,
+    per-position activation (position index broadcast across d_model) and
+    whose fake SAE reconstructs perfectly (decode(encode(x)) == x) -- makes
+    n_tokens and which positions survived exclusion directly checkable
+    without needing a real model/SAE pair or network access, unlike the
+    integration tests above.
+    """
+
+    class _FakeModel:
+        def to_tokens(self, prompt: str) -> "torch.Tensor":
+            length = token_lengths[int(prompt)]
+            return torch.arange(length).reshape(1, length)
+
+        def run_with_hooks(self, tokens: "torch.Tensor", fwd_hooks: list) -> None:
+            ((_hook_name, hook_fn),) = fwd_hooks
+            seq_len = tokens.shape[1]
+            # position i's activation is [i, i, ..., i] -- token index is
+            # recoverable directly from the captured tensor's own values.
+            act = tokens.reshape(1, seq_len, 1).float().expand(1, seq_len, d_model)
+            hook_fn(act, None)
+
+    class _FakeSAE:
+        def encode(self, acts: "torch.Tensor") -> "torch.Tensor":
+            return acts
+
+        def decode(self, acts: "torch.Tensor") -> "torch.Tensor":
+            return acts
+
+    return LoadedPrismModel(model=_FakeModel(), sae=_FakeSAE(), hook_name="fake_hook")
+
+
+def test_validate_reconstruction_excludes_token_index_zero() -> None:
+    # Two prompts, 4 and 3 tokens; positions are [0,1,2,3] and [0,1,2].
+    # Excluding index 0 from each should leave exactly [1,2,3,1,2] -- 5
+    # rows, none of them a 0.
+    loaded = _fake_loaded_for_reconstruction(token_lengths=[4, 3])
+
+    result = validate_reconstruction(loaded, prompts=["0", "1"])
+
+    assert result["n_tokens"] == 5
+
+
+def test_validate_reconstruction_raises_on_a_prompt_too_short_to_exclude_bos_from() -> None:
+    # A 1-token prompt has nothing left after excluding index 0.
+    loaded = _fake_loaded_for_reconstruction(token_lengths=[1])
+
+    with pytest.raises(ValueError, match="too short to exclude a BOS token from"):
+        validate_reconstruction(loaded, prompts=["0"])
 
 
 def _fake_loaded_for_frequency(activations: list, encoded_output: "torch.Tensor") -> LoadedPrismModel:
@@ -255,17 +315,21 @@ def _fake_loaded_with_identity_encoder(activations: list) -> LoadedPrismModel:
 
 
 def test_measure_activation_frequencies_chunking_matches_unchunked() -> None:
-    # Four one-token documents; the fake SAE passes activations through
+    # Four two-token documents; the fake SAE passes activations through
     # unchanged, so each document's own values determine which "features"
-    # (columns) count as active. chunk_size=1 forces four separate encode()
-    # calls; chunk_size=1000 forces one, covering the whole corpus.
+    # (columns) count as active. Position 0 of every document is a BOS
+    # stand-in with a value ([1, 1]) that would inflate both rates to 1.0
+    # if the exclusion (ADR-0022) broke -- position 1 carries the real
+    # per-document signal the expected [0.5, 0.5] is computed from.
+    # chunk_size=1 forces four separate encode() calls; chunk_size=1000
+    # forces one, covering the whole corpus.
     activations = [
-        torch.tensor([[1.0, 0.0]]),
-        torch.tensor([[0.0, 1.0]]),
-        torch.tensor([[1.0, 1.0]]),
-        torch.tensor([[0.0, 0.0]]),
+        torch.tensor([[[1.0, 1.0], [1.0, 0.0]]]),
+        torch.tensor([[[1.0, 1.0], [0.0, 1.0]]]),
+        torch.tensor([[[1.0, 1.0], [1.0, 1.0]]]),
+        torch.tensor([[[1.0, 1.0], [0.0, 0.0]]]),
     ]
-    token_batches = [torch.zeros(1, 1, dtype=torch.long) for _ in activations]
+    token_batches = [torch.zeros(1, 2, dtype=torch.long) for _ in activations]
 
     chunked = measure_activation_frequencies(
         _fake_loaded_with_identity_encoder(activations), token_batches, chunk_size=1
@@ -279,21 +343,30 @@ def test_measure_activation_frequencies_chunking_matches_unchunked() -> None:
 
 
 def test_measure_activation_frequencies_rejects_non_positive_chunk_size() -> None:
-    loaded = _fake_loaded_with_identity_encoder([torch.tensor([[1.0]])])
+    loaded = _fake_loaded_with_identity_encoder([torch.tensor([[1.0, 1.0]])])
 
     with pytest.raises(ValueError, match="chunk_size must be positive"):
-        measure_activation_frequencies(loaded, [torch.zeros(1, 1, dtype=torch.long)], chunk_size=0)
+        measure_activation_frequencies(loaded, [torch.zeros(1, 2, dtype=torch.long)], chunk_size=0)
+
+
+def test_measure_activation_frequencies_rejects_a_document_too_short_to_exclude_bos_from() -> None:
+    loaded = _fake_loaded_with_identity_encoder([torch.tensor([[1.0, 1.0]])])
+
+    with pytest.raises(ValueError, match="too short to exclude a BOS token from"):
+        measure_activation_frequencies(loaded, [torch.zeros(1, 1, dtype=torch.long)])
 
 
 def test_measure_activation_frequencies_counts_nonzero_encoded_activations() -> None:
-    # Two one-token batches, concatenated to two rows before the single
-    # encode() call; the fake SAE "encodes" that to a fixed 3-feature matrix
-    # so the expected per-feature rate can be computed by hand.
+    # Two two-token batches; measure_activation_frequencies() slices off
+    # each batch's position 0 (BOS, ADR-0022) before the model ever sees
+    # it captured, so only one row per batch reaches encode() -- the fake
+    # SAE "encodes" those two rows to a fixed 3-feature matrix so the
+    # expected per-feature rate can be computed by hand.
     loaded = _fake_loaded_for_frequency(
-        activations=[torch.zeros(1, 1, 2), torch.zeros(1, 1, 2)],
+        activations=[torch.zeros(1, 2, 2), torch.zeros(1, 2, 2)],
         encoded_output=torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 5.0]]),
     )
-    token_batches = [torch.zeros(1, 1, dtype=torch.long), torch.zeros(1, 1, dtype=torch.long)]
+    token_batches = [torch.zeros(1, 2, dtype=torch.long), torch.zeros(1, 2, dtype=torch.long)]
 
     rates = measure_activation_frequencies(loaded, token_batches)
 
@@ -301,12 +374,14 @@ def test_measure_activation_frequencies_counts_nonzero_encoded_activations() -> 
 
 
 def test_measure_activation_frequencies_handles_multi_token_batches() -> None:
+    # A five-token document; position 0 (BOS) is excluded before capture,
+    # leaving the four rows the expected rates below are computed from.
     loaded = _fake_loaded_for_frequency(
-        activations=[torch.zeros(1, 4, 2)],
+        activations=[torch.zeros(1, 5, 2)],
         encoded_output=torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 2.0]]),
     )
 
-    rates = measure_activation_frequencies(loaded, [torch.zeros(1, 4, dtype=torch.long)])
+    rates = measure_activation_frequencies(loaded, [torch.zeros(1, 5, dtype=torch.long)])
 
     np.testing.assert_allclose(rates, [0.5, 0.25])
 
@@ -376,18 +451,36 @@ def test_top_activating_snippets_returns_empty_list_for_a_feature_that_never_fir
 
 
 def test_top_activating_snippets_spans_multiple_documents() -> None:
-    # Two one-token documents; the stronger activation lives in the second
-    # document, so its snippet must be drawn from that document's own tokens,
-    # not the first document's, even though it's ranked first in the result.
-    activations = [torch.tensor([[[0.5]]]), torch.tensor([[[0.8]]])]
-    token_batches = [torch.tensor([[100]]), torch.tensor([[200]])]
+    # Two two-token documents; position 0 of each is a BOS stand-in (never
+    # a snippet candidate, ADR-0022) with a value too low to matter either
+    # way -- the stronger real activation lives in the second document's
+    # position 1, so its snippet must be drawn from that document's own
+    # tokens, not the first document's, even though it's ranked first in
+    # the result.
+    activations = [torch.tensor([[[0.0], [0.5]]]), torch.tensor([[[0.0], [0.8]]])]
+    token_batches = [torch.tensor([[50, 100]]), torch.tensor([[60, 200]])]
 
     result = top_activating_snippets(
         _fake_loaded_for_snippets(activations), [0], token_batches, k=5, context_tokens=2
     )
 
-    assert [entry["snippet"] for entry in result[0]] == ["200", "100"]
+    assert [entry["snippet"] for entry in result[0]] == ["60 200", "50 100"]
     np.testing.assert_allclose([entry["activation"] for entry in result[0]], [0.8, 0.5], rtol=1e-6)
+
+
+def test_top_activating_snippets_never_selects_the_bos_position() -> None:
+    # A single document whose BOS position (index 0) has the highest raw
+    # activation value of any token -- if the exclusion (ADR-0022) broke,
+    # this would be the top (only) result instead of the real content
+    # token at index 2.
+    activations = [torch.tensor([[[9.0], [0.1], [0.4]]])]
+    token_batches = [torch.arange(3).reshape(1, 3)]
+
+    result = top_activating_snippets(
+        _fake_loaded_for_snippets(activations), [0], token_batches, k=5, context_tokens=1
+    )
+
+    np.testing.assert_allclose([entry["activation"] for entry in result[0]], [0.4, 0.1], rtol=1e-6)
 
 
 def test_top_activating_snippets_clips_the_window_at_document_boundaries() -> None:
