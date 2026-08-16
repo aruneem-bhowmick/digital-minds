@@ -1,0 +1,61 @@
+# Gemma Scope 2B generalization check (REQ-11) -- a separate config file
+# rather than making configs/experiment.yaml polymorphic, so the Pythia
+# config (the primary result) stays untouched. Mirrors experiment.yaml's
+# structure field-for-field; see that file's own header comment for the
+# general "no guessed TODOs" rule this one follows too.
+
+model:
+  name: google/gemma-2-2b  # gated on Hugging Face; requires an HF_TOKEN from an account
+                            # that has accepted Google's Gemma license (see .env)
+  checkpoint_revision: c5ebcd40d208330abc697524c919956e692655cf  # pinned commit, not `main`
+
+sae:
+  # REQ-11: Gemma Scope's residual-stream SAE at layer 20 (~77% depth of the
+  # model's 26 blocks, close to the "2/3 through the model" heuristic ADR-0009
+  # also uses as its own fallback), 16k-width variant -- the widest Gemma
+  # Scope checkpoint at this layer small enough for sae-bounding's exact
+  # per-feature identifiability computation (see ARCHITECTURE.md's REQ-11 ADR).
+  loader: gemma_scope_npz  # explicit, not inferred -- a different download/construct
+                            # path than the hf_safetensors loader experiment.yaml uses
+  checkpoint_repo: google/gemma-scope-2b-pt-res
+  checkpoint_revision: fd571b47c1c64851e9b1989792367b9babb4af63
+  checkpoint_filename: layer_20/width_16k/average_l0_22/params.npz
+  checkpoint_sha256: 579081b71d611ae6a2df57d865606ab2df2b36cc5db5d0b0566f6e5b42b9b2fb
+  sae_lens_release: gemma-scope-2b-pt-res
+  sae_lens_sae_id: layer_20/width_16k/average_l0_22
+  hook_name: blocks.20.hook_resid_post
+
+injection:
+  layer: 20  # fixed by which SAE checkpoint exists, not a fractional-depth choice --
+             # layer_source: "sae-checkpoint-layer" in trial records, not "adr-0009-fallback"
+  strengths: TODO  # REQ-11 / calibration pilot: strength scale does not transfer from
+                    # Pythia even with decoder-atom normalization -- resolve via a real pilot
+
+features:
+  n_total: TODO  # REQ-11: sized from the calibration pilot's measured CPU throughput,
+                  # not fixed in advance -- "reduced feature count" per the original scope
+  sample_seed: 0
+
+identifiability_source:
+  # REQ-11: computed by extending sae-bounding with a new registered checkpoint
+  # (this project's own PR: aruneem-bhowmick/sae-bounding#7), same pattern as
+  # experiment.yaml's Pythia identifiability_source block. Pinned to that PR
+  # branch's commit, not yet merged to sae-bounding's main -- the checksum
+  # already guarantees the identifiability CSV's content regardless of merge
+  # state; update this commit hash once #7 merges.
+  repo: aruneem-bhowmick/sae-bounding
+  commit: f2824f7df12358371ca77087ddea8a52c87a5d70
+  checksum: 28312dbe0d64473191944dc0947e6a939ca5335c2fd3dff07eba6e5881e82859
+
+sampling:
+  seeds: TODO  # REQ-11: reduced seed count for compute budget, resolved alongside n_total
+
+generation:
+  temperature_qualitative: 0
+  temperature_systematic: 1
+  max_new_tokens: 60
+
+judge:
+  model: claude-opus-4-8
+  concept_grounding_k: 5
+  concept_grounding_context_tokens: 8
