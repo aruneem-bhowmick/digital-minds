@@ -13,10 +13,13 @@ injection active but substitutes one of the versioned
 ``prompts.unrelated_control_prompt()`` questions for the detection question,
 to check for a generic yes-bias independent of the injected concept.
 
-REQ-10 has not resolved the primary injection layer yet; every trial here
-uses ``layers.get_fallback_layer()`` (ADR-0009's explicit fallback) and
-records ``layer_source: "adr-0009-fallback"`` on every row, the same
-convention REQ-5's calibration pilot already established.
+Every trial's injection layer comes from ``layers.resolve_injection_layer()``,
+which honors an explicit ``config["injection"]["layer"]`` (e.g. REQ-11's
+Gemma Scope config, pinned to the SAE checkpoint's own trained layer) before
+falling back to ``layers.get_fallback_layer()`` (ADR-0009's explicit
+fallback, still what Pythia's config resolves to since REQ-10 hasn't
+resolved its primary layer). ``layer_source`` records which one a row
+actually used, the same convention REQ-5's calibration pilot established.
 
 This module does not implement judge scoring (REQ-8): every record it writes
 carries ``judge_scores: null``.
@@ -34,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prism.inject import inject_concept, no_injection
-from prism.layers import get_fallback_layer
+from prism.layers import resolve_injection_layer
 from prism.prompts import (
     DEFAULT_CONTROL_QUESTIONS_PATH,
     detection_prompt,
@@ -355,8 +358,7 @@ def run_systematic_trials(
     ``{"run": n, "skipped": n}`` so a caller can see how much of a resumed
     run was already done.
     """
-    layer = get_fallback_layer(loaded.model.cfg.n_layers)
-    layer_source = "adr-0009-fallback"
+    layer, layer_source = resolve_injection_layer(config, loaded.model.cfg.n_layers)
     strengths = [float(s) for s in config["injection"]["strengths"]]
     seeds = [int(s) for s in config["sampling"]["seeds"]]
     temperature = float(config["generation"]["temperature_systematic"])
@@ -377,7 +379,9 @@ def run_systematic_trials(
                     continue
 
                 def hooks_fn(pos: int, _atom: Any = decoder_atom, _strength: float = strength) -> list:
-                    return inject_concept(loaded.model, _atom, layer=layer, strength=_strength, token_start_pos=pos)
+                    return inject_concept(
+                        loaded.model, _atom, hook_name=loaded.hook_name, strength=_strength, token_start_pos=pos
+                    )
 
                 model_response = run_two_turn_trial(
                     loaded, hooks_fn, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
@@ -425,8 +429,7 @@ def run_baseline_trials(
     matching baseline and systematic rows one-to-one -- but carries no causal
     weight here, since nothing was actually injected.
     """
-    layer = get_fallback_layer(loaded.model.cfg.n_layers)
-    layer_source = "adr-0009-fallback"
+    layer, layer_source = resolve_injection_layer(config, loaded.model.cfg.n_layers)
     seeds = [int(s) for s in config["sampling"]["seeds"]]
     temperature = float(config["generation"]["temperature_systematic"])
 
@@ -444,7 +447,7 @@ def run_baseline_trials(
                 continue
 
             def hooks_fn(pos: int) -> list:
-                return no_injection(loaded.model, layer=layer, token_start_pos=pos)
+                return no_injection(loaded.model, hook_name=loaded.hook_name, token_start_pos=pos)
 
             model_response = run_two_turn_trial(
                 loaded, hooks_fn, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens
@@ -497,8 +500,7 @@ def run_control_trials(
     No naming follow-up: control questions have no injected concept to name,
     so ``run_control_trial()`` makes one generation per trial, not two.
     """
-    layer = get_fallback_layer(loaded.model.cfg.n_layers)
-    layer_source = "adr-0009-fallback"
+    layer, layer_source = resolve_injection_layer(config, loaded.model.cfg.n_layers)
     strengths = [float(s) for s in config["injection"]["strengths"]]
     seed = int(config["sampling"]["seeds"][0])
     temperature = float(config["generation"]["temperature_systematic"])
@@ -528,7 +530,9 @@ def run_control_trials(
 
             tokens = loaded.model.to_tokens(question["question"])
             token_start_pos = tokens.shape[1] - 1
-            hooks = inject_concept(loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos)
+            hooks = inject_concept(
+                loaded.model, decoder_atom, hook_name=loaded.hook_name, strength=strength, token_start_pos=token_start_pos
+            )
 
             model_response = run_control_trial(
                 loaded, hooks, tokens, question, seed=seed, temperature=temperature, max_new_tokens=max_new_tokens

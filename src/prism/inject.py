@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 def inject_concept(
     model: "HookedTransformer",
     decoder_atom: "torch.Tensor | None",
-    layer: int,
+    hook_name: str,
     strength: float,
     token_start_pos: int,
 ) -> "list[tuple[str, Callable[[torch.Tensor, Any], torch.Tensor]]]":
@@ -45,9 +45,18 @@ def inject_concept(
     ``with model.hooks(fwd_hooks=inject_concept(...)): model.generate(...)``
     with no branching on whether a trial is injected.
 
-    Raises if ``layer`` has no matching residual-stream hook point on
-    ``model`` -- a wrong-layer config error needs to surface here, before a
-    hook is ever attached, not several calls downstream during generation.
+    ``hook_name`` must be the exact hook point the SAE's own dictionary was
+    fit against (``models.LoadedPrismModel.hook_name``, e.g.
+    ``blocks.4.hook_resid_pre`` for Pythia or ``blocks.20.hook_resid_post``
+    for Gemma Scope) -- not reconstructed from a layer number, since that
+    convention isn't uniform across checkpoints (ADR-0024: an earlier
+    version of this function always assumed ``hook_resid_pre``, which
+    silently injected Gemma trials one hook-tap before the site the SAE
+    was actually trained on).
+
+    Raises if ``hook_name`` has no matching hook point on ``model`` -- a
+    wrong-hook config error needs to surface here, before a hook is ever
+    attached, not several calls downstream during generation.
     """
     if decoder_atom is None:
         return []
@@ -61,11 +70,10 @@ def inject_concept(
     if token_start_pos < 0:
         raise ValueError(f"token_start_pos must be non-negative, got {token_start_pos}")
 
-    hook_name = _resid_pre_hook_name(layer)
     if hook_name not in model.hook_dict:
         raise ValueError(
-            f"layer {layer} has no {hook_name!r} hook point on this model; "
-            "check the configured injection layer against the model's depth"
+            f"{hook_name!r} has no matching hook point on this model; "
+            "check the configured injection hook name against the model's depth/architecture"
         )
 
     injected_vector = _scaled_atom(decoder_atom, strength)
@@ -73,26 +81,14 @@ def inject_concept(
 
 
 def no_injection(
-    model: "HookedTransformer", layer: int, token_start_pos: int
+    model: "HookedTransformer", hook_name: str, token_start_pos: int
 ) -> "list[tuple[str, Callable[[torch.Tensor, Any], torch.Tensor]]]":
     """Explicit no-injection passthrough, sharing ``inject_concept``'s argument
     shape (REQ-7) so a baseline-trial call site reads the same as an injected
     one, differing only in which function name it calls.
     """
-    del layer, token_start_pos  # kept for interface symmetry with inject_concept, unused here
+    del hook_name, token_start_pos  # kept for interface symmetry with inject_concept, unused here
     return []
-
-
-def _resid_pre_hook_name(layer: int) -> str:
-    """The residual-stream hook point this project injects into.
-
-    ``hook_resid_pre`` mirrors the SAE's own hook-point convention
-    (``configs/experiment.yaml``'s ``sae.hook_name``) and standard
-    activation-steering practice: the vector is added to the residual
-    stream immediately entering the chosen layer, the same site a decoder
-    atom's own dictionary was fit against.
-    """
-    return f"blocks.{layer}.hook_resid_pre"
 
 
 def _scaled_atom(decoder_atom: "torch.Tensor", strength: float) -> "torch.Tensor":
@@ -340,7 +336,11 @@ def run_calibration_pilot(
 
         for strength in strengths:
             hooks = inject_concept(
-                loaded.model, decoder_atom, layer=layer, strength=strength, token_start_pos=token_start_pos
+                loaded.model,
+                decoder_atom,
+                hook_name=loaded.hook_name,
+                strength=strength,
+                token_start_pos=token_start_pos,
             )
             with loaded.model.hooks(fwd_hooks=hooks):
                 output = loaded.model.generate(
@@ -441,7 +441,7 @@ def main() -> None:
     import pandas as pd
     import yaml
 
-    from prism.layers import get_fallback_layer
+    from prism.layers import resolve_injection_layer
     from prism.models import load_model_and_sae
     from prism.prompts import detection_prompt
 
@@ -474,7 +474,7 @@ def main() -> None:
     seed = config.get("features", {}).get("sample_seed", 0)
     pilot_features = select_pilot_features(sampled, n_features=args.n_features, seed=seed)
 
-    layer = get_fallback_layer(loaded.model.cfg.n_layers)
+    layer, layer_source = resolve_injection_layer(config, loaded.model.cfg.n_layers)
     if args.strengths is not None:
         strengths = [float(s) for s in args.strengths.split(",")]
     else:
@@ -485,7 +485,7 @@ def main() -> None:
         pilot_features,
         strengths,
         layer=layer,
-        layer_source="adr-0009-fallback",
+        layer_source=layer_source,
         prompt=detection_prompt(),
         config=config,
         pilot_feature_seed=seed,

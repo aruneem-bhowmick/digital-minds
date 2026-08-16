@@ -28,11 +28,15 @@ sae:
 injection:
   layer: 20  # fixed by which SAE checkpoint exists, not a fractional-depth choice --
              # layer_source: "sae-checkpoint-layer" in trial records, not "adr-0009-fallback"
-  strengths: TODO  # REQ-11 / calibration pilot: strength scale does not transfer from
-                    # Pythia even with decoder-atom normalization -- resolve via a real pilot
+  strengths: [20, 60, 150, 400]  # REQ-11 calibration pilot (data/results/calibration_notes_gemma.md):
+                                   # spans the weak/emerging-signal edge through the confirmed
+                                   # too-strong boundary on this checkpoint, ~50-150x Pythia's own
+                                   # band in absolute magnitude (Gemma's much larger residual-stream
+                                   # norm at this depth), not a value carried over from Pythia's config
 
 features:
-  n_total: TODO  # REQ-11: sized from the calibration pilot's measured CPU throughput,
+  n_total: TODO  # REQ-11: sized from the calibration pilot's measured GPU throughput
+                  # (~8.9s/trial on a Modal A10G, data/results/calibration_notes_gemma.md),
                   # not fixed in advance -- "reduced feature count" per the original scope
   sample_seed: 0
 
