@@ -111,6 +111,15 @@ def _download(sandbox: modal.Sandbox, repo_relative_path: str) -> Path:
     return local_path
 
 
+def _upload(sandbox: modal.Sandbox, local_path: Path, repo_relative_path: str) -> None:
+    """Copy one local file into the sandbox's repo checkout before the
+    command runs -- the upload-side mirror of _download(). For local-only
+    inputs the remote command needs but this repo doesn't track (e.g.
+    sae-bounding's per-feature identifiability CSV, gitignored there).
+    """
+    sandbox.filesystem.copy_from_local(local_path, f"{REPO_DIR}/{repo_relative_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--branch", required=True)
@@ -122,6 +131,15 @@ def main() -> None:
         action="append",
         default=[],
         help="repo-relative path to copy back after the command succeeds; repeatable",
+    )
+    parser.add_argument(
+        "--upload",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("LOCAL_PATH", "REPO_RELATIVE_PATH"),
+        help="copy a local file into the sandbox's repo checkout before running the "
+        "command; repeatable",
     )
     args = parser.parse_args()
 
@@ -147,6 +165,11 @@ def main() -> None:
                 step_name="git clone",
             )
             _run_step(sandbox, "pip", "install", "-e", ".", workdir=REPO_DIR, step_name="pip install")
+
+            for local_path, repo_relative_path in args.upload:
+                _upload(sandbox, Path(local_path), repo_relative_path)
+                print(f"[modal_run] uploaded {local_path} -> {repo_relative_path}")
+
             _run_step(sandbox, "bash", "-c", args.command, workdir=REPO_DIR, step_name="command")
 
             print(f"\n[modal_run] command succeeded on {args.gpu}")
