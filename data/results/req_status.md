@@ -29,7 +29,7 @@ No other placeholder, TODO, or hardcoded example value was found.
 - `judge_validated.flag`, `judge_validation_sample.md`: no embedded `git_commit` field, but both are version-controlled and traceable via `git log` (`85da775`).
 - `data/results/figures/*`: generated this session by `python -m prism.figures` against the committed `regression_results.json`, `analysis_table.csv`, and `calibration_pilot.jsonl` above. Inherits their provenance rather than carrying its own, since a figure is a rendering of already-provenanced numbers, not a new measurement.
 
-All six commit hashes above were checked directly against this repository's object store (`git cat-file -t <hash>`) and confirmed to exist as real commits, not invented placeholders.
+All nine distinct commit hashes above were checked directly against this repository's object store (`git cat-file -t <hash>`) and confirmed to exist as real commits, not invented placeholders.
 
 ## REQ-1 through REQ-14
 
