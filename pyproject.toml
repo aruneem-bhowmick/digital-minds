@@ -19,6 +19,8 @@ dependencies = [
     "pyyaml==6.0.3",
     "pytest==9.1.1",
     "datasets==5.0.1",
+    "modal==1.5.4",
+    "python-dotenv==1.2.2",
 ]
 
 [build-system]
