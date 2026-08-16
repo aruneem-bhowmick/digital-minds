@@ -116,8 +116,15 @@ def _upload(sandbox: modal.Sandbox, local_path: Path, repo_relative_path: str) -
     command runs -- the upload-side mirror of _download(). For local-only
     inputs the remote command needs but this repo doesn't track (e.g.
     sae-bounding's per-feature identifiability CSV, gitignored there).
+
+    Creates the destination's parent directory first, mirroring _download()'s
+    local-side mkdir(parents=True, exist_ok=True) -- a fresh git clone won't
+    contain an untracked or gitignored destination directory on its own.
     """
-    sandbox.filesystem.copy_from_local(local_path, f"{REPO_DIR}/{repo_relative_path}")
+    remote_path = f"{REPO_DIR}/{repo_relative_path}"
+    remote_parent = remote_path.rsplit("/", 1)[0]
+    sandbox.filesystem.make_directory(remote_parent, create_parents=True)
+    sandbox.filesystem.copy_from_local(local_path, remote_path)
 
 
 def main() -> None:
