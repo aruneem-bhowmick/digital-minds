@@ -216,6 +216,10 @@ def fit_inference_model(
     degenerate = [
         name for name in covariates if not np.isfinite(x_std[name]) or np.isclose(x_std[name], 0)
     ]
+    converged = False
+    convergence_note = ""
+    coefficients: dict[str, dict[str, float]] = {}
+
     if degenerate:
         # Standardizing would divide by zero (or by a non-finite or
         # near-zero std -- floating-point noise around an otherwise-constant
@@ -226,40 +230,28 @@ def fit_inference_model(
         # coefficient. A degenerate covariate in this trial subset is itself
         # the reportable finding: there's no real variation for the fit to
         # attribute an effect to.
-        return {
-            "n_trials": n_trials,
-            "n_detections": n_detections,
-            "covariates": covariates,
-            "standardization": standardization,
-            "converged": False,
-            "convergence_note": (
-                f"covariate(s) {degenerate} have zero, near-zero, or non-finite variance in this "
-                "trial subset"
-            ),
-            "coefficients": {},
-        }
-
-    x_standardized = (x_raw - x_mean) / x_std
-    x_design = sm.add_constant(x_standardized, has_constant="add")
-    y = subset[DETECTION_TARGET_COLUMN].astype(int)
-
-    converged = False
-    convergence_note = ""
-    coefficients: dict[str, dict[str, float]] = {}
-    try:
-        fit_result = sm.Logit(y, x_design).fit(disp=0)
-        converged = bool(fit_result.mle_retvals.get("converged", False))
-        conf_int = fit_result.conf_int(alpha=0.05)
-        for name in x_design.columns:
-            coefficients[name] = {
-                "estimate": float(fit_result.params[name]),
-                "ci_low": float(conf_int.loc[name, 0]),
-                "ci_high": float(conf_int.loc[name, 1]),
-            }
-        if not converged:
-            convergence_note = "statsmodels reported mle_retvals['converged'] == False"
-    except (PerfectSeparationError, MissingDataError, np.linalg.LinAlgError) as exc:
-        convergence_note = f"{type(exc).__name__}: {exc}"
+        convergence_note = (
+            f"covariate(s) {degenerate} have zero, near-zero, or non-finite variance in this "
+            "trial subset"
+        )
+    else:
+        x_standardized = (x_raw - x_mean) / x_std
+        x_design = sm.add_constant(x_standardized, has_constant="add")
+        y = subset[DETECTION_TARGET_COLUMN].astype(int)
+        try:
+            fit_result = sm.Logit(y, x_design).fit(disp=0)
+            converged = bool(fit_result.mle_retvals.get("converged", False))
+            conf_int = fit_result.conf_int(alpha=0.05)
+            for name in x_design.columns:
+                coefficients[name] = {
+                    "estimate": float(fit_result.params[name]),
+                    "ci_low": float(conf_int.loc[name, 0]),
+                    "ci_high": float(conf_int.loc[name, 1]),
+                }
+            if not converged:
+                convergence_note = "statsmodels reported mle_retvals['converged'] == False"
+        except (PerfectSeparationError, MissingDataError, np.linalg.LinAlgError) as exc:
+            convergence_note = f"{type(exc).__name__}: {exc}"
 
     return {
         "n_trials": n_trials,
