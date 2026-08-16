@@ -1,0 +1,3 @@
+classifier,auc,n_trials,n_detections
+identifiability_score,0.6331923890063424,474,1
+decoder_norm,0.7621564482029598,474,1
