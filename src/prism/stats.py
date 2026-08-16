@@ -277,13 +277,20 @@ def compare_classifiers(
     n_trials = len(subset)
     n_detections = int(y.sum())
 
+    single_class = n_detections in (0, n_trials)
     rows = []
     for covariate in ("identifiability_score", "decoder_norm"):
-        x = subset[[covariate]].astype(float).to_numpy()
-        classifier = LogisticRegression()
-        classifier.fit(x, y)
-        scores = classifier.predict_proba(x)[:, 1]
-        auc = float(roc_auc_score(y, scores)) if n_detections not in (0, n_trials) else float("nan")
+        if single_class:
+            # LogisticRegression.fit() raises on a single-class target
+            # ("needs samples of at least 2 classes"), so there is nothing
+            # to fit -- an undefined AUC is the honest result, not a crash.
+            auc = float("nan")
+        else:
+            x = subset[[covariate]].astype(float).to_numpy()
+            classifier = LogisticRegression()
+            classifier.fit(x, y)
+            scores = classifier.predict_proba(x)[:, 1]
+            auc = float(roc_auc_score(y, scores))
         rows.append({"classifier": covariate, "auc": auc, "n_trials": n_trials, "n_detections": n_detections})
 
     return pd.DataFrame(rows)
