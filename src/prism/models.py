@@ -1,10 +1,21 @@
-"""Model + SAE loading (REQ-1, REQ-2).
+"""Model + SAE loading (REQ-1, REQ-2, REQ-11).
 
 REQ-1 / ADR-0010: the SAE dependency resolves to an existing checkpoint, not
 a trained-from-scratch fallback. ``load_model_and_sae`` loads Pythia-70m-deduped
 through TransformerLens and pairs it with the exact residual-stream SAE the
 frame-theoretic identifiability audit already scored (Hugging Face
 ``ghidav/pythia-70m-deduped-sae``, layer 4, ``blocks.4.hook_resid_pre``).
+
+REQ-11: the same function also loads Gemma-2-2b paired with a Gemma Scope
+residual-stream SAE, selected by ``config["sae"]["loader"]`` rather than
+inferred from other fields -- Gemma Scope's ``.npz`` checkpoints need a
+different download-and-construct path than Pythia's safetensors-plus-cfg.json
+layout, so this is a second explicit branch, not a special case threaded
+through the existing one. Everything downstream of ``LoadedPrismModel``
+(``_validate_pairing``, ``measure_activation_frequencies``, ``decoder_norms``,
+``top_activating_snippets``, ``validate_reconstruction``) is unmodified and
+works against either model, since both loading paths return the same
+``sae_lens.SAE`` interface.
 """
 
 from __future__ import annotations
@@ -55,16 +66,30 @@ def load_model_and_sae(config: dict[str, Any], device: str = "cpu") -> LoadedPri
     configured hook name doesn't exist on the loaded model or doesn't match
     the hook the SAE was trained against -- a wrong-layer config error
     should surface here, not several modules downstream during injection.
+
+    ``config["sae"]["loader"]`` picks which SAE-loading path runs
+    (``"hf_safetensors"``, the default, for Pythia's checkpoint layout;
+    ``"gemma_scope_npz"`` for REQ-11's Gemma Scope checkpoint). Checked
+    before touching the network, so an unrecognized value fails immediately
+    rather than after downloading the base model.
     """
+    sae_cfg = config["sae"]
+    hook_name = sae_cfg["hook_name"]
+    loader = sae_cfg.get("loader", "hf_safetensors")
+    if loader not in ("hf_safetensors", "gemma_scope_npz"):
+        raise ValueError(
+            f"unrecognized sae.loader {loader!r}; expected 'hf_safetensors' or 'gemma_scope_npz'"
+        )
+
     model_name = config["model"]["name"]
     model_revision = config["model"]["checkpoint_revision"]
     model = HookedTransformer.from_pretrained(model_name, revision=model_revision, device=device)
 
-    sae_cfg = config["sae"]
-    hook_name = sae_cfg["hook_name"]
-
-    checkpoint_dir = _download_sae_checkpoint(sae_cfg)
-    sae = SAE.load_from_disk(checkpoint_dir, device=device)
+    if loader == "hf_safetensors":
+        checkpoint_dir = _download_sae_checkpoint(sae_cfg)
+        sae = SAE.load_from_disk(checkpoint_dir, device=device)
+    else:
+        sae = _load_gemma_scope_sae(sae_cfg, device=device)
 
     _validate_pairing(model, sae, hook_name, model_name=model_name)
 
@@ -128,6 +153,35 @@ def _download_sae_checkpoint(sae_cfg: dict[str, Any]) -> Path:
 
     assert weights_path is not None
     return weights_path.parent
+
+
+def _load_gemma_scope_sae(sae_cfg: dict[str, Any], device: str) -> SAE:
+    """Download, checksum-verify, and load a Gemma Scope SAE (REQ-11).
+
+    Gemma Scope ships ``.npz`` checkpoints -- a different format than the
+    safetensors-plus-``cfg.json`` layout ``_download_sae_checkpoint`` reads
+    for the Pythia checkpoint, so this is a second loading path rather than
+    a branch inside that one. The checksum verification happens first,
+    against the exact file this project pinned (matching ``sae-bounding``'s
+    own registry entry for this cohort) -- only after that passes does
+    ``SAE.from_pretrained()`` construct the actual SAE object, which
+    resolves to the same cached file (same repo, filename, and revision)
+    rather than re-fetching unverified content.
+    """
+    downloaded = Path(
+        hf_hub_download(
+            repo_id=sae_cfg["checkpoint_repo"],
+            filename=sae_cfg["checkpoint_filename"],
+            revision=sae_cfg["checkpoint_revision"],
+        )
+    )
+    _verify_sha256(downloaded, sae_cfg["checkpoint_sha256"])
+
+    return SAE.from_pretrained(
+        release=sae_cfg["sae_lens_release"],
+        sae_id=sae_cfg["sae_lens_sae_id"],
+        device=device,
+    )
 
 
 def _verify_sha256(path: Path, expected: str) -> None:
