@@ -189,7 +189,11 @@ def test_load_model_and_sae_returns_a_working_gemma_pair() -> None:
 
     result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
 
-    assert result["n_tokens"] == 120
+    # 129, not Pythia's 120 -- same 8 prompts, but Gemma's tokenizer isn't
+    # Pythia's, so the same English text doesn't tokenize to the same count.
+    # RECONSTRUCTION_VALIDATION_PROMPTS is one canonical corpus shared across
+    # models; a fixed token count was never part of that contract.
+    assert result["n_tokens"] == 129
     assert 0.0 <= result["fraction_variance_explained"] <= 1.0
 
     output_path = save_reconstruction_result(
