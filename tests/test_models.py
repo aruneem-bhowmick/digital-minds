@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,6 +24,7 @@ from prism.models import (
 )
 
 CONFIG_PATH = "configs/experiment.yaml"
+GEMMA_CONFIG_PATH = "configs/experiment_gemma.yaml"
 
 
 def _fake_model(hook_names: list[str], d_model: int) -> SimpleNamespace:
@@ -102,6 +104,38 @@ def test_config_has_no_remaining_model_or_sae_todos() -> None:
         assert config["sae"][field] != "TODO"
 
 
+def test_gemma_config_has_no_remaining_model_or_sae_todos() -> None:
+    # injection.strengths/features.n_total/sampling.seeds stay TODO pending
+    # REQ-11's calibration pilot -- only the model/SAE loading fields, which
+    # are already resolved, get checked here.
+    with open(GEMMA_CONFIG_PATH, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    assert config["model"]["name"] != "TODO"
+    assert config["model"]["checkpoint_revision"] != "TODO"
+    for field in (
+        "loader",
+        "checkpoint_repo",
+        "checkpoint_revision",
+        "checkpoint_filename",
+        "checkpoint_sha256",
+        "sae_lens_release",
+        "sae_lens_sae_id",
+        "hook_name",
+    ):
+        assert config["sae"][field] != "TODO"
+
+
+def test_load_model_and_sae_rejects_an_unrecognized_loader() -> None:
+    config = {
+        "model": {"name": "irrelevant", "checkpoint_revision": "irrelevant"},
+        "sae": {"loader": "not_a_real_loader", "hook_name": "irrelevant"},
+    }
+
+    with pytest.raises(ValueError, match="unrecognized sae.loader"):
+        load_model_and_sae(config)
+
+
 @pytest.mark.integration
 def test_load_model_and_sae_returns_a_working_pair() -> None:
     """Real, network-dependent load against the resolved checkpoint (ADR-0010).
@@ -131,6 +165,36 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
     assert result["fraction_variance_explained"] >= 0.9
 
     output_path = save_reconstruction_result(config, result)
+    assert output_path.exists()
+
+
+@pytest.mark.integration
+def test_load_model_and_sae_returns_a_working_gemma_pair() -> None:
+    """Real, network-dependent load of REQ-11's Gemma Scope pair.
+
+    Requires HF_TOKEN in the environment for an account that has accepted
+    google/gemma-2-2b's gated license -- same posture as the Pythia
+    integration test above (not a mock, per CLAUDE.md), just against a
+    second model. Writes to its own output path so a run doesn't overwrite
+    REQ-1's Pythia reconstruction result.
+    """
+    with open(GEMMA_CONFIG_PATH, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    loaded = load_model_and_sae(config)
+
+    assert loaded.sae.cfg.d_in == loaded.model.cfg.d_model
+    assert loaded.hook_name in loaded.model.hook_dict
+    assert loaded.sae.W_dec.shape[0] == 16384
+
+    result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
+
+    assert result["n_tokens"] == 120
+    assert 0.0 <= result["fraction_variance_explained"] <= 1.0
+
+    output_path = save_reconstruction_result(
+        config, result, output_path=Path("data/results/req1_gemma_sae_validation.json")
+    )
     assert output_path.exists()
 
 
