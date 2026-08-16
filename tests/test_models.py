@@ -159,8 +159,12 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
 
     result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
 
-    assert result["n_tokens"] == 120
-    # Measured 0.9808 on this checkpoint; floor set below that with margin for
+    # 112, not 120: validate_reconstruction() excludes each prompt's BOS
+    # token (ADR-0022) -- 8 prompts, 8 fewer tokens.
+    assert result["n_tokens"] == 112
+    # Measured 0.9782 on this checkpoint post-BOS-exclusion (was 0.9808
+    # including it -- the BOS-outlier effect is real here too, just far
+    # less severe than on Gemma); floor set below that with margin for
     # tokenizer/library version drift, not tuned to just barely pass.
     assert result["fraction_variance_explained"] >= 0.9
 
@@ -189,11 +193,12 @@ def test_load_model_and_sae_returns_a_working_gemma_pair() -> None:
 
     result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
 
-    # 129, not Pythia's 120 -- same 8 prompts, but Gemma's tokenizer isn't
-    # Pythia's, so the same English text doesn't tokenize to the same count.
-    # RECONSTRUCTION_VALIDATION_PROMPTS is one canonical corpus shared across
-    # models; a fixed token count was never part of that contract.
-    assert result["n_tokens"] == 129
+    # 121, not Pythia's 112 -- same 8 prompts (each losing its BOS token,
+    # ADR-0022), but Gemma's tokenizer isn't Pythia's, so the same English
+    # text doesn't tokenize to the same count. RECONSTRUCTION_VALIDATION_PROMPTS
+    # is one canonical corpus shared across models; a fixed token count was
+    # never part of that contract.
+    assert result["n_tokens"] == 121
     assert 0.0 <= result["fraction_variance_explained"] <= 1.0
 
     output_path = save_reconstruction_result(
