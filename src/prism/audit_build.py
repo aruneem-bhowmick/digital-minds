@@ -123,6 +123,7 @@ def build_feature_audit_table(
         "identifiability_source_repo": source_config["repo"],
         "identifiability_source_commit": source_config["commit"],
         "identifiability_source_sha256": actual_sha256,
+        "device": device,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, cwd=_REPO_ROOT
         ).strip(),
@@ -180,6 +181,13 @@ def main() -> None:
     )
     parser.add_argument("--corpus-dataset", default=DEFAULT_CORPUS_DATASET)
     parser.add_argument("--corpus-revision", default=DEFAULT_CORPUS_REVISION)
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="passed straight to load_model_and_sae(); defaults to 'cpu' to match "
+        "this project's Pythia runs -- a Modal GPU invocation must pass 'cuda' "
+        "explicitly (load_model_and_sae() does not auto-detect it)",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
@@ -192,6 +200,7 @@ def main() -> None:
         max_tokens_per_document=args.max_tokens_per_document,
         corpus_dataset=args.corpus_dataset,
         corpus_revision=args.corpus_revision,
+        device=args.device,
     )
 
     output_path = Path(args.output)
