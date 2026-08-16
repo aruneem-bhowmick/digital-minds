@@ -80,8 +80,7 @@ def _download(sandbox: modal.Sandbox, repo_relative_path: str) -> Path:
     """
     local_path = Path(repo_relative_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    with sandbox.open(f"{REPO_DIR}/{repo_relative_path}", "rb") as remote_file:
-        local_path.write_bytes(remote_file.read())
+    sandbox.filesystem.copy_to_local(f"{REPO_DIR}/{repo_relative_path}", local_path)
     return local_path
 
 
