@@ -29,6 +29,7 @@ from prism.figures import (
     make_identifiability_detection_figure,
     make_layer_comparison_figure_if_available,
     predicted_detection_curve,
+    summarize_calibration_pilot,
 )
 
 # --- fixtures -----------------------------------------------------------------
@@ -180,14 +181,47 @@ def test_make_identifiability_detection_figure_raises_on_missing_column(tmp_path
         make_identifiability_detection_figure(table, _regression_results(), output_dir=tmp_path)
 
 
+# --- summarize_calibration_pilot() ----------------------------------------------
+
+
+def test_summarize_calibration_pilot_returns_one_row_per_strength(tmp_path: Path) -> None:
+    pilot_path = tmp_path / "calibration_pilot.jsonl"
+    _calibration_pilot_jsonl(pilot_path, strengths=[1.0, 2.0, 4.0], n_features=3)
+
+    summary = summarize_calibration_pilot(pilot_path)
+
+    assert sorted(summary["strength"]) == [1.0, 2.0, 4.0]
+    assert "n_words" in summary.columns
+
+
+def test_summarize_calibration_pilot_matches_a_hand_computed_mean(tmp_path: Path) -> None:
+    pilot_path = tmp_path / "calibration_pilot.jsonl"
+    # n_words = 50 - strength*3 + feature_id, feature_id in {0, 1, 2}
+    _calibration_pilot_jsonl(pilot_path, strengths=[1.0], n_features=3)
+
+    summary = summarize_calibration_pilot(pilot_path)
+
+    expected_mean = ((50 - 3) + (50 - 3 + 1) + (50 - 3 + 2)) / 3
+    assert summary.loc[summary["strength"] == 1.0, "n_words"].iloc[0] == pytest.approx(expected_mean)
+
+
+def test_summarize_calibration_pilot_raises_on_empty_pilot_log(tmp_path: Path) -> None:
+    pilot_path = tmp_path / "calibration_pilot.jsonl"
+    pilot_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no pilot records"):
+        summarize_calibration_pilot(pilot_path)
+
+
 # --- make_calibration_figure() -------------------------------------------------
 
 
 def test_make_calibration_figure_writes_svg_and_png(tmp_path: Path) -> None:
     pilot_path = tmp_path / "calibration_pilot.jsonl"
     _calibration_pilot_jsonl(pilot_path, strengths=[1.0, 2.0, 4.0, 8.0, 16.0])
+    summary = summarize_calibration_pilot(pilot_path)
 
-    paths = make_calibration_figure(pilot_path, output_dir=tmp_path / "figures")
+    paths = make_calibration_figure(pilot_path, summary, output_dir=tmp_path / "figures")
 
     assert {p.suffix for p in paths} == {".svg", ".png"}
     for path in paths:
@@ -200,7 +234,15 @@ def test_make_calibration_figure_raises_on_empty_pilot_log(tmp_path: Path) -> No
     pilot_path.write_text("", encoding="utf-8")
 
     with pytest.raises(ValueError, match="no pilot records"):
-        make_calibration_figure(pilot_path, output_dir=tmp_path / "figures")
+        make_calibration_figure(pilot_path, pd.DataFrame({"strength": [1.0], "n_words": [10.0]}), output_dir=tmp_path / "figures")
+
+
+def test_make_calibration_figure_raises_without_a_precomputed_summary(tmp_path: Path) -> None:
+    pilot_path = tmp_path / "calibration_pilot.jsonl"
+    _calibration_pilot_jsonl(pilot_path, strengths=[1.0, 2.0])
+
+    with pytest.raises(ValueError, match="summarize_calibration_pilot"):
+        make_calibration_figure(pilot_path, None, output_dir=tmp_path / "figures")
 
 
 # --- layer_comparison_available() / make_layer_comparison_figure_if_available() ---
@@ -265,6 +307,7 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
     _calibration_pilot_jsonl(calibration_pilot_path, strengths=[1.0, 2.0, 4.0, 8.0])
 
     output_dir = tmp_path / "figures"
+    calibration_summary_path = tmp_path / "calibration_summary.csv"
 
     monkeypatch.setattr(
         sys,
@@ -274,6 +317,7 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
             "--regression-results-path", str(regression_results_path),
             "--analysis-table-path", str(analysis_table_path),
             "--calibration-pilot-path", str(calibration_pilot_path),
+            "--calibration-summary-path", str(calibration_summary_path),
             "--output-dir", str(output_dir),
         ],
     )
@@ -287,6 +331,9 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
         "strength_calibration.png",
         "strength_calibration.svg",
     ]
+    assert calibration_summary_path.exists()
+    summary = pd.read_csv(calibration_summary_path)
+    assert sorted(summary["strength"]) == [1.0, 2.0, 4.0, 8.0]
 
     captured = capsys.readouterr()
     assert "skipped layer-comparison figure" in captured.out

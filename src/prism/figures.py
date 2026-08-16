@@ -1,10 +1,16 @@
 """Figure generation (Prompt 11, feeding REQ-12's report).
 
-Reads exclusively from ``data/results/`` -- nothing here recomputes a
-statistic. Every number plotted was already produced by ``stats.py``
-(REQ-9) or logged directly by the REQ-5 calibration pilot, per the split
-ADR-0005/ADR-0006 already draw between data collection, analysis, and
-presentation.
+Every ``make_*_figure()`` function draws only from data that already
+exists as a committed ``data/results/`` artifact -- none of them compute a
+statistic themselves, per the split ADR-0005/ADR-0006 draw between data
+collection, analysis, and presentation. The one number that needed
+computing before it could be plotted (the REQ-5 pilot's per-strength mean
+response length) has its own precomputation step,
+``summarize_calibration_pilot()``, kept out of the plotting function and
+persisted to ``data/results/calibration_summary.csv`` before
+``make_calibration_figure()`` ever reads it -- the same pattern
+``stats.py`` (REQ-9) uses to separate computing a result from presenting
+it.
 
 Three figures are in scope per Prompt 11:
 
@@ -35,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_REGRESSION_RESULTS_PATH = "data/results/regression_results.json"
 DEFAULT_ANALYSIS_TABLE_PATH = "data/results/analysis_table.csv"
 DEFAULT_CALIBRATION_PILOT_PATH = "data/results/calibration_pilot.jsonl"
+DEFAULT_CALIBRATION_SUMMARY_PATH = "data/results/calibration_summary.csv"
 DEFAULT_FIGURES_DIR = "data/results/figures"
 
 # Colors are the dataviz skill's validated default palette instance
@@ -264,8 +271,42 @@ def _load_calibration_pilot(path: "str | Path") -> pd.DataFrame:
     return df
 
 
+def summarize_calibration_pilot(
+    calibration_pilot_path: "str | Path" = DEFAULT_CALIBRATION_PILOT_PATH,
+) -> pd.DataFrame:
+    """Per-strength mean response length from the REQ-5 pilot log.
+
+    A distinct precomputation step, not part of ``make_calibration_figure()``
+    itself -- ADR-0005/ADR-0006's rule against recomputing a statistic
+    inline in a plotting script applies to a groupby mean the same way it
+    applies to a regression coefficient. This function's output is meant to
+    be persisted (``save_calibration_summary()``) and loaded by the figure,
+    not called from inside it.
+    """
+    df = _load_calibration_pilot(calibration_pilot_path)
+    if df.empty:
+        raise ValueError(f"{calibration_pilot_path} has no pilot records to summarize")
+    return (
+        df.groupby("strength")["n_words"]
+        .mean()
+        .reset_index()
+        .sort_values("strength")
+        .reset_index(drop=True)
+    )
+
+
+def save_calibration_summary(
+    summary: pd.DataFrame, output_path: "str | Path" = DEFAULT_CALIBRATION_SUMMARY_PATH
+) -> Path:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(output_path, index=False)
+    return output_path
+
+
 def make_calibration_figure(
     calibration_pilot_path: "str | Path" = DEFAULT_CALIBRATION_PILOT_PATH,
+    calibration_summary: "pd.DataFrame | None" = None,
     output_dir: "str | Path" = DEFAULT_FIGURES_DIR,
     *,
     chosen_strengths: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0),
@@ -279,12 +320,23 @@ def make_calibration_figure(
     strength tested) stays visible rather than smoothed into a single curve.
     ``chosen_strengths`` marks the band actually carried into
     ``configs/experiment.yaml`` for REQ-6's systematic trials.
+
+    ``calibration_summary`` is required and must come from
+    ``summarize_calibration_pilot()`` -- this function draws the mean line
+    from it rather than computing the mean itself, so the number plotted
+    always matches whatever was actually persisted to
+    ``data/results/calibration_summary.csv``.
     """
     df = _load_calibration_pilot(calibration_pilot_path)
     if df.empty:
         raise ValueError(f"{calibration_pilot_path} has no pilot records to plot")
+    if calibration_summary is None or calibration_summary.empty:
+        raise ValueError(
+            "calibration_summary must be precomputed via summarize_calibration_pilot() "
+            "and passed in -- this function does not compute it"
+        )
 
-    means = df.groupby("strength")["n_words"].mean().reset_index().sort_values("strength")
+    means = calibration_summary.sort_values("strength")
     strengths_sorted = sorted(df["strength"].unique())
 
     fig, ax = plt.subplots(figsize=(7.0, 4.4))
@@ -398,10 +450,10 @@ def main() -> None:
     """CLI entry point: ``python -m prism.figures``.
 
     Reads ``regression_results.json``, ``analysis_table.csv``, and
-    ``calibration_pilot.jsonl`` from ``data/results/`` and writes every
-    figure that has real data behind it to ``data/results/figures/``.
-    Nothing here recomputes a statistic; everything plotted was already
-    written by ``stats.py`` (REQ-9) or the REQ-5 calibration pilot.
+    ``calibration_pilot.jsonl`` from ``data/results/``; also writes
+    ``calibration_summary.csv`` (the one precomputation step this module
+    owns) before the calibration figure reads it back. Writes every figure
+    that has real data behind it to ``data/results/figures/``.
     """
     import argparse
 
@@ -411,6 +463,7 @@ def main() -> None:
     parser.add_argument("--regression-results-path", default=DEFAULT_REGRESSION_RESULTS_PATH)
     parser.add_argument("--analysis-table-path", default=DEFAULT_ANALYSIS_TABLE_PATH)
     parser.add_argument("--calibration-pilot-path", default=DEFAULT_CALIBRATION_PILOT_PATH)
+    parser.add_argument("--calibration-summary-path", default=DEFAULT_CALIBRATION_SUMMARY_PATH)
     parser.add_argument("--output-dir", default=DEFAULT_FIGURES_DIR)
     args = parser.parse_args()
 
@@ -421,7 +474,10 @@ def main() -> None:
     for path in make_identifiability_detection_figure(analysis_table, regression_results, args.output_dir):
         print(f"wrote {path}")
 
-    for path in make_calibration_figure(args.calibration_pilot_path, args.output_dir):
+    calibration_summary = summarize_calibration_pilot(args.calibration_pilot_path)
+    summary_path = save_calibration_summary(calibration_summary, args.calibration_summary_path)
+    print(f"wrote {summary_path}")
+    for path in make_calibration_figure(args.calibration_pilot_path, calibration_summary, args.output_dir):
         print(f"wrote {path}")
 
     layer_figures = make_layer_comparison_figure_if_available(analysis_table, args.output_dir)
