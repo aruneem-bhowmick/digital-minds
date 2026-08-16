@@ -386,6 +386,18 @@ Inspecting per-token activation norms directly found the actual cause: the first
 
 ---
 
+## ADR-0023: REQ-11 finding — audit_build.py silently ran Gemma-2-2b on CPU inside GPU sandboxes
+
+**Context:** REQ-11 Step 3's feature audit (`audit_build.py` against the Gemma Scope pair, 500 documents through `measure_activation_frequencies()`) was run twice on Modal GPU sandboxes and failed both times: first a timeout at the sandbox's 30-minute limit, then an OOM kill (exit 137) at 90 minutes on a retry. Root cause: `load_model_and_sae(config, device: str = "cpu")` defaults to CPU and has no auto-detection, and `audit_build.py`'s `main()` never passed `device` through at all. Both Modal runs -- and, on inspection, REQ-11 Step 2's earlier "real Modal A10G GPU" reconstruction check (`test_load_model_and_sae_returns_a_working_gemma_pair`, also never passing an explicit device) -- were silently executing Gemma-2-2b on the sandbox's CPU the entire time, not its GPU. Step 2's small 8-prompt workload was slow but tolerable on CPU, which is why that failure mode wasn't caught then; Step 3's 500-document corpus was not, timing out and then exhausting host RAM (large activation/encode tensors piling up outside GPU VRAM, at CPU speed) rather than genuinely needing more GPU memory than an A10G provides.
+
+**Decision:** `audit_build.py` gains an explicit `--device` CLI flag (default `"cpu"`, so Pythia's existing invocation is unchanged) threaded through to `load_model_and_sae()`, and records the value used in the provenance JSON. `test_load_model_and_sae_returns_a_working_gemma_pair` now auto-detects CUDA (`torch.cuda.is_available()`) rather than relying on the default, since that test genuinely runs in both a local CPU-only environment and a Modal GPU sandbox. This does not change any previously reported number: CPU and GPU execution of the same float32 weights compute the same forward pass, and Step 2's committed `fraction_variance_explained = 0.6786` is not being recomputed or revised on that basis -- it was measured on real, unmodified model weights and is not invalidated by which processor ran the arithmetic. What was wrong was Modal GPU time being billed and unused, and Step 3's job needing a device it was never actually told to use.
+
+**Alternatives considered:** Making `load_model_and_sae()` auto-detect CUDA by default (rejected -- this project's own convention favors explicit config over inferred behavior, established for `sae.loader`; a shared function used by both the always-CPU Pythia pipeline and the sometimes-GPU Gemma pipeline should not guess which one a given call site wants). Leaving Step 2's result and its PR description uncorrected (rejected -- CLAUDE.md's reproducibility rule requires being able to reconstruct a result from its logged config, and "ran on Modal A10G GPU" was stated as fact in that PR when it was not what happened).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
