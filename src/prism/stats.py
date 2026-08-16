@@ -6,12 +6,12 @@ decoder norm, and activation frequency in ``data/audit/features.csv``,
 producing the single regression-ready table both analyses in this module
 consume (ADR-0005's consequence: one join, not one per caller).
 
-``fit_inference_model()`` is the primary analysis SPRINT-PLAN.md Section
-3.6 and ADR-0006 call for: a statsmodels logistic regression of
-detection-correct on identifiability_score, with confidence intervals.
-It restricts to the systematic injection trials and derives its binary
-target from the judge's affirmative-detection field alone; see ADR-0020
-for why.
+``fit_inference_model()`` and ``compare_classifiers()`` are the two
+analyses SPRINT-PLAN.md Section 3.6 and ADR-0006 call for: a statsmodels
+logistic regression with confidence intervals, and a scikit-learn AUC
+comparison against the obvious decoder-norm confound. Both restrict to
+the systematic injection trials and derive their binary target from the
+judge's affirmative-detection field alone; see ADR-0020 for why.
 
 Every public function here refuses to run before
 ``data/results/judge_validated.flag`` (REQ-8) exists -- CLAUDE.md's rule
@@ -28,6 +28,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from statsmodels.tools.sm_exceptions import PerfectSeparationError
 
 from prism.features import load_feature_audit
@@ -229,3 +231,101 @@ def fit_inference_model(
         "convergence_note": convergence_note,
         "coefficients": coefficients,
     }
+
+
+# --- REQ-9: identifiability vs. the norm confound ---------------------------
+
+
+def compare_classifiers(
+    trials_df: pd.DataFrame,
+    *,
+    validation_flag_path: "str | Path" = DEFAULT_VALIDATION_FLAG_PATH,
+) -> pd.DataFrame:
+    """AUC comparison between a classifier using only identifiability_score
+    and one using only decoder_norm (SPRINT-PLAN.md Section 3.6, ADR-0006).
+
+    Tests whether identifiability adds predictive value beyond the obvious
+    norm confound. Uses the same trial subset and detection-correct target
+    as ``fit_inference_model()``, scored in-sample: the dataset's positive
+    class is too sparse to support a held-out split without either fold
+    containing zero positives, so a train/test AUC would not measure
+    anything a held-out split is meant to measure. Returns one row per
+    classifier.
+    """
+    _require_judge_validated(validation_flag_path)
+
+    subset = _add_detection_target(_detection_subset(trials_df))
+    y = subset[DETECTION_TARGET_COLUMN].astype(int).to_numpy()
+    n_trials = len(subset)
+    n_detections = int(y.sum())
+
+    rows = []
+    for covariate in ("identifiability_score", "decoder_norm"):
+        x = subset[[covariate]].astype(float).to_numpy()
+        classifier = LogisticRegression()
+        classifier.fit(x, y)
+        scores = classifier.predict_proba(x)[:, 1]
+        auc = float(roc_auc_score(y, scores)) if n_detections not in (0, n_trials) else float("nan")
+        rows.append({"classifier": covariate, "auc": auc, "n_trials": n_trials, "n_detections": n_detections})
+
+    return pd.DataFrame(rows)
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def _git_commit() -> str:
+    import subprocess
+
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+
+def main() -> None:
+    """CLI entry point: ``python -m prism.stats``.
+
+    Builds the analysis table, runs both analyses, and writes all three
+    outputs to ``data/results/`` -- nothing here is hand-edited, everything
+    is regenerable by re-running this command.
+    """
+    import argparse
+    from datetime import datetime, timezone
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
+    parser.add_argument("--audit-path", default=DEFAULT_AUDIT_PATH)
+    parser.add_argument("--validation-flag-path", default=DEFAULT_VALIDATION_FLAG_PATH)
+    parser.add_argument("--analysis-table-path", default="data/results/analysis_table.csv")
+    parser.add_argument("--regression-results-path", default="data/results/regression_results.json")
+    parser.add_argument("--auc-comparison-path", default="data/results/auc_comparison.csv")
+    args = parser.parse_args()
+
+    table = build_analysis_table(
+        args.trials_path, args.audit_path, validation_flag_path=args.validation_flag_path
+    )
+    analysis_table_path = Path(args.analysis_table_path)
+    analysis_table_path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(analysis_table_path, index=False)
+    print(f"wrote {analysis_table_path} ({len(table)} rows)")
+
+    regression = fit_inference_model(table, validation_flag_path=args.validation_flag_path)
+    regression_record = {
+        **regression,
+        "trials_path": str(args.trials_path),
+        "git_commit": _git_commit(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    regression_results_path = Path(args.regression_results_path)
+    regression_results_path.parent.mkdir(parents=True, exist_ok=True)
+    regression_results_path.write_text(json.dumps(regression_record, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {regression_results_path} (converged={regression['converged']})")
+
+    auc_table = compare_classifiers(table, validation_flag_path=args.validation_flag_path)
+    auc_comparison_path = Path(args.auc_comparison_path)
+    auc_comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    auc_table.to_csv(auc_comparison_path, index=False)
+    print(f"wrote {auc_comparison_path}")
+    print(auc_table.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
