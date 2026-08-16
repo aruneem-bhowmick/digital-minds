@@ -441,7 +441,7 @@ def main() -> None:
     import pandas as pd
     import yaml
 
-    from prism.layers import get_fallback_layer
+    from prism.layers import resolve_injection_layer
     from prism.models import load_model_and_sae
     from prism.prompts import detection_prompt
 
@@ -474,7 +474,7 @@ def main() -> None:
     seed = config.get("features", {}).get("sample_seed", 0)
     pilot_features = select_pilot_features(sampled, n_features=args.n_features, seed=seed)
 
-    layer = get_fallback_layer(loaded.model.cfg.n_layers)
+    layer, layer_source = resolve_injection_layer(config, loaded.model.cfg.n_layers)
     if args.strengths is not None:
         strengths = [float(s) for s in args.strengths.split(",")]
     else:
@@ -485,7 +485,7 @@ def main() -> None:
         pilot_features,
         strengths,
         layer=layer,
-        layer_source="adr-0009-fallback",
+        layer_source=layer_source,
         prompt=detection_prompt(),
         config=config,
         pilot_feature_seed=seed,
