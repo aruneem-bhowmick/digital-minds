@@ -197,13 +197,25 @@ def validate_reconstruction(loaded: LoadedPrismModel, prompts: list[str]) -> dic
     """Encode/decode real residual-stream activations through the SAE and report
     fraction of variance explained, per REQ-1's definition of done: reconstruction
     quality is reported, not assumed, regardless of which ADR-0002 branch was taken.
+
+    Excludes each prompt's first token (BOS) from the reported metric.
+    REQ-11's real Gemma run found this token's activation norm running
+    roughly 8-9x every other token's at layer 20 -- a documented
+    attention-sink outlier, not a reconstruction failure -- which alone
+    was enough to drag a per-token fraction-variance-explained deeply
+    negative even though every other token reconstructed well (0.63
+    excluding it, versus catastrophically negative including it). This is
+    the same convention published SAE evaluations use, not a Gemma-specific
+    carve-out: excluding it is the correct read for either model, and
+    ADR-0022 records the real before/after numbers for both rather than
+    changing this silently.
     """
     import torch
 
     activations: list[torch.Tensor] = []
 
     def _capture(act: "torch.Tensor", hook: Any) -> "torch.Tensor":
-        activations.append(act.detach())
+        activations.append(act.detach()[:, 1:, :])
         return act
 
     for prompt in prompts:
