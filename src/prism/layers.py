@@ -53,16 +53,34 @@ def resolve_injection_layer(config: dict[str, Any], n_layers: int) -> tuple[int,
 
     ``configs/experiment.yaml``'s Pythia config leaves ``injection.layer`` as
     the literal string ``"TODO"`` (REQ-10 hasn't resolved it), and some test
-    fixtures omit the key entirely -- both cases fall back the same way, so
-    every call against an unresolved config still gets the ADR-0009
-    fractional-depth fallback, exactly as before this function existed.
+    fixtures omit the ``injection`` key (or set it to ``None``) entirely --
+    all three cases fall back the same way, so every call against an
+    unresolved config still gets the ADR-0009 fractional-depth fallback,
+    exactly as before this function existed. Checking for the literal
+    ``"TODO"`` sentinel specifically, not "any string," matters: a config
+    author's typo like ``layer: "20"`` (quoted, still a string) should be
+    used as layer 20, not silently redirected to a different fallback layer
+    with no warning.
+
     ``configs/experiment_gemma.yaml`` pins ``injection.layer: 20`` -- the
     Gemma Scope SAE's own trained layer, a constraint from which checkpoint
     exists, not a resolved REQ-10 choice -- and callers need to use that
     value rather than silently recomputing an ADR-0009 fallback that doesn't
-    match the SAE's own hook point.
+    match the SAE's own hook point. ``layer_source`` for an explicit value
+    is always recorded as ``"sae-checkpoint-layer"`` today, since that's the
+    only way an explicit value gets into either config currently in this
+    repo; if REQ-10 later resolves a UCARE-trajectory layer into
+    ``injection.layer`` too, that will need its own distinguishable
+    provenance value here rather than reusing this one.
     """
-    layer = config.get("injection", {}).get("layer")
-    if layer is None or isinstance(layer, str):
+    layer = config.get("injection") or {}
+    layer = layer.get("layer")
+    if layer is None or layer == "TODO":
         return get_fallback_layer(n_layers), "adr-0009-fallback"
-    return int(layer), "sae-checkpoint-layer"
+    layer = int(layer)
+    if not 0 <= layer < n_layers:
+        raise ValueError(
+            f"config[\"injection\"][\"layer\"]={layer} is out of range for a "
+            f"{n_layers}-layer model (valid range: 0..{n_layers - 1})"
+        )
+    return layer, "sae-checkpoint-layer"
