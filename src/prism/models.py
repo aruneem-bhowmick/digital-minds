@@ -161,13 +161,22 @@ def _load_gemma_scope_sae(sae_cfg: dict[str, Any], device: str) -> SAE:
     Gemma Scope ships ``.npz`` checkpoints -- a different format than the
     safetensors-plus-``cfg.json`` layout ``_download_sae_checkpoint`` reads
     for the Pythia checkpoint, so this is a second loading path rather than
-    a branch inside that one. The checksum verification happens first,
-    against the exact file this project pinned (matching ``sae-bounding``'s
-    own registry entry for this cohort) -- only after that passes does
-    ``SAE.from_pretrained()`` construct the actual SAE object, which
-    resolves to the same cached file (same repo, filename, and revision)
-    rather than re-fetching unverified content.
+    a branch inside that one.
+
+    ``sae_lens.SAE.from_pretrained()`` has no ``revision`` parameter at
+    all -- it resolves ``release``/``sae_id`` through its own registry with
+    no way for a caller to pin which commit of ``checkpoint_repo`` that
+    resolves to. Downloading and checksumming the file ourselves first
+    (matching ``_download_sae_checkpoint``'s pattern) only proves the
+    checksum passes on *a* download; it doesn't prove ``from_pretrained()``
+    actually loaded those same bytes. So this also compares the two
+    decoder matrices directly after loading, and raises if they don't
+    match -- a real, enforced guarantee instead of an assumption the
+    docstring used to state without checking it.
     """
+    import numpy as np
+    import torch
+
     downloaded = Path(
         hf_hub_download(
             repo_id=sae_cfg["checkpoint_repo"],
@@ -176,12 +185,23 @@ def _load_gemma_scope_sae(sae_cfg: dict[str, Any], device: str) -> SAE:
         )
     )
     _verify_sha256(downloaded, sae_cfg["checkpoint_sha256"])
+    with np.load(downloaded) as archive:
+        checksummed_w_dec = archive["W_dec"]
 
-    return SAE.from_pretrained(
+    sae = SAE.from_pretrained(
         release=sae_cfg["sae_lens_release"],
         sae_id=sae_cfg["sae_lens_sae_id"],
         device=device,
     )
+    loaded_w_dec = sae.W_dec.detach().to(torch.float32).cpu().numpy()
+    if not np.allclose(loaded_w_dec, checksummed_w_dec.astype(np.float32), atol=1e-6):
+        raise ValueError(
+            f"SAE.from_pretrained(release={sae_cfg['sae_lens_release']!r}, "
+            f"sae_id={sae_cfg['sae_lens_sae_id']!r}) loaded a decoder matrix that does "
+            f"not match the checksum-verified {downloaded} -- sae_lens resolved this "
+            "release/sae_id to different weights than the pinned checkpoint_revision"
+        )
+    return sae
 
 
 def _verify_sha256(path: Path, expected: str) -> None:
