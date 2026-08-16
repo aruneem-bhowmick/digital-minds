@@ -30,7 +30,7 @@ import pandas as pd
 import statsmodels.api as sm
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
-from statsmodels.tools.sm_exceptions import PerfectSeparationError
+from statsmodels.tools.sm_exceptions import MissingDataError, PerfectSeparationError
 
 from prism.features import load_feature_audit
 
@@ -200,13 +200,18 @@ def fit_inference_model(
     x_std = x_raw.std(ddof=0)
     standardization = {name: {"mean": float(x_mean[name]), "std": float(x_std[name])} for name in covariates}
 
-    zero_variance = [name for name in covariates if x_std[name] == 0]
-    if zero_variance:
-        # Standardizing would divide by zero and hand statsmodels a NaN/inf
-        # design matrix -- which raises whichever internal exception happens
-        # to fire first (MissingDataError, LinAlgError, ...) with a message
-        # that doesn't say why. A constant covariate in this trial subset is
-        # itself the reportable finding: there's no variation for the fit to
+    degenerate = [
+        name for name in covariates if not np.isfinite(x_std[name]) or np.isclose(x_std[name], 0)
+    ]
+    if degenerate:
+        # Standardizing would divide by zero (or by a non-finite or
+        # near-zero std -- floating-point noise around an otherwise-constant
+        # covariate, not a real distribution) and hand statsmodels a
+        # NaN/inf/enormous design matrix -- which raises whichever internal
+        # exception happens to fire first (MissingDataError, LinAlgError,
+        # ...) or silently "converges" to a numerically meaningless
+        # coefficient. A degenerate covariate in this trial subset is itself
+        # the reportable finding: there's no real variation for the fit to
         # attribute an effect to.
         return {
             "n_trials": n_trials,
@@ -214,7 +219,10 @@ def fit_inference_model(
             "covariates": covariates,
             "standardization": standardization,
             "converged": False,
-            "convergence_note": f"covariate(s) {zero_variance} have zero variance in this trial subset",
+            "convergence_note": (
+                f"covariate(s) {degenerate} have zero, near-zero, or non-finite variance in this "
+                "trial subset"
+            ),
             "coefficients": {},
         }
 
@@ -237,7 +245,7 @@ def fit_inference_model(
             }
         if not converged:
             convergence_note = "statsmodels reported mle_retvals['converged'] == False"
-    except (PerfectSeparationError, np.linalg.LinAlgError) as exc:
+    except (PerfectSeparationError, MissingDataError, np.linalg.LinAlgError) as exc:
         convergence_note = f"{type(exc).__name__}: {exc}"
 
     return {
