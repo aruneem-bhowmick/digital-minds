@@ -18,8 +18,8 @@ Usage: ``python -m prism.modal_run --branch req-11/gemma-scope-2b-loading
 from __future__ import annotations
 
 import argparse
-import os
 import sys
+from pathlib import Path
 
 import modal
 
@@ -72,12 +72,31 @@ def _secrets() -> list[modal.Secret]:
     return [modal.Secret.from_dict(env_values)]
 
 
+def _download(sandbox: modal.Sandbox, repo_relative_path: str) -> Path:
+    """Copy one file from the sandbox's repo checkout back to this machine's
+    identical path, so a real result the remote GPU produced becomes a real
+    local file this project's own commit/provenance discipline can track --
+    not something left stranded on ephemeral sandbox storage.
+    """
+    local_path = Path(repo_relative_path)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    with sandbox.open(f"{REPO_DIR}/{repo_relative_path}", "rb") as remote_file:
+        local_path.write_bytes(remote_file.read())
+    return local_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--branch", required=True)
     parser.add_argument("--command", required=True, help="shell command run from the repo root")
     parser.add_argument("--gpu", default="A10G")
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument(
+        "--download",
+        action="append",
+        default=[],
+        help="repo-relative path to copy back after the command succeeds; repeatable",
+    )
     args = parser.parse_args()
 
     with modal.enable_output(), app.run():
@@ -115,6 +134,10 @@ def main() -> None:
                 raise RuntimeError(f"command failed with exit code {run.returncode}")
 
             print(f"\n[modal_run] command succeeded on {args.gpu}")
+
+            for repo_relative_path in args.download:
+                local_path = _download(sandbox, repo_relative_path)
+                print(f"[modal_run] downloaded {local_path}")
         finally:
             sandbox.terminate()
 
