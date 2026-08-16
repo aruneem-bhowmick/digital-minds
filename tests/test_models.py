@@ -152,12 +152,17 @@ def test_load_model_and_sae_returns_a_working_pair() -> None:
     with open(CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    loaded = load_model_and_sae(config)
+    device = "cpu"  # ADR-0009's fallback layer and this project's whole Pythia
+    # pipeline are designed to run on CPU; recorded explicitly (not just
+    # implicit from load_model_and_sae()'s own default) so this result's
+    # provenance states it the same way the Gemma result does (ADR-0023).
+    loaded = load_model_and_sae(config, device=device)
 
     assert loaded.sae.cfg.d_in == loaded.model.cfg.d_model
     assert loaded.hook_name in loaded.model.hook_dict
 
     result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
+    result["device"] = device
 
     # 112, not 120: validate_reconstruction() excludes each prompt's BOS
     # token (ADR-0022) -- 8 prompts, 8 fewer tokens.
@@ -181,17 +186,25 @@ def test_load_model_and_sae_returns_a_working_gemma_pair() -> None:
     integration test above (not a mock, per CLAUDE.md), just against a
     second model. Writes to its own output path so a run doesn't overwrite
     REQ-1's Pythia reconstruction result.
+
+    Auto-detects CUDA rather than hardcoding a device: this test runs both
+    locally (CPU only) and inside a Modal GPU sandbox, and load_model_and_sae()
+    itself defaults to "cpu" unconditionally -- silently staying on CPU inside
+    a GPU sandbox is exactly the failure mode that made audit_build.py's own
+    corpus-scale run (REQ-11 Step 3) time out and then OOM.
     """
     with open(GEMMA_CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    loaded = load_model_and_sae(config)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loaded = load_model_and_sae(config, device=device)
 
     assert loaded.sae.cfg.d_in == loaded.model.cfg.d_model
     assert loaded.hook_name in loaded.model.hook_dict
     assert loaded.sae.W_dec.shape[0] == 16384
 
     result = validate_reconstruction(loaded, RECONSTRUCTION_VALIDATION_PROMPTS)
+    result["device"] = device
 
     # 121, not Pythia's 112 -- same 8 prompts (each losing its BOS token,
     # ADR-0022), but Gemma's tokenizer isn't Pythia's, so the same English

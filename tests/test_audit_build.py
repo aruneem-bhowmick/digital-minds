@@ -153,3 +153,30 @@ def test_build_feature_audit_table_records_source_identity_not_a_local_path(
     assert provenance["identifiability_source_repo"] == "someone/sae-bounding-fork"
     assert provenance["identifiability_source_commit"] == _SOURCE_COMMIT
     assert provenance["identifiability_source_sha256"] == audit_build._sha256(path)
+
+
+def test_build_feature_audit_table_passes_device_through_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # load_model_and_sae() defaults to "cpu" unconditionally (it does not
+    # auto-detect CUDA) -- a caller running this against a GPU-backed Modal
+    # sandbox must pass "cuda" through explicitly, or the whole run silently
+    # executes on the sandbox's CPU instead (the actual cause of REQ-11 Step
+    # 3's first two Modal runs timing out and then OOM-ing).
+    path = _write_identifiability(tmp_path, [0, 1, 2])
+    received_devices: list[str] = []
+    monkeypatch.setattr(
+        audit_build,
+        "load_model_and_sae",
+        lambda config, device="cpu": (received_devices.append(device), _fake_loaded(3))[1],
+    )
+    monkeypatch.setattr(
+        audit_build, "measure_activation_frequencies", lambda loaded, batches: np.array([0.1, 0.2, 0.3])
+    )
+    monkeypatch.setattr(audit_build, "_load_corpus", lambda *args, **kwargs: ([], {}))
+    _stub_git_commit(monkeypatch)
+
+    _, provenance = audit_build.build_feature_audit_table(_config_matching(path), path, device="cuda")
+
+    assert received_devices == ["cuda"]
+    assert provenance["device"] == "cuda"

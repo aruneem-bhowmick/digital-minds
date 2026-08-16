@@ -618,6 +618,14 @@ def main() -> None:
         metavar="NOTE",
         help="write data/results/judge_validated.flag with this reviewer note, and do nothing else",
     )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="passed straight to load_model_and_sae() for the grounding step; defaults to "
+        "'cpu' -- a Modal GPU invocation must pass 'cuda' explicitly (load_model_and_sae() "
+        "does not auto-detect it, see ADR-0023)",
+    )
     args = parser.parse_args()
 
     if args.confirm_validated is not None:
@@ -646,7 +654,7 @@ def main() -> None:
     grounding: dict[str, list[dict[str, Any]]] = {}
 
     if "grounding" in steps:
-        loaded = load_model_and_sae(config)
+        loaded = load_model_and_sae(config, device=args.device)
         sampled_features = pd.read_csv(args.sampled_features)
         feature_ids = sorted(int(fid) for fid in sampled_features["feature_id"].unique())
 

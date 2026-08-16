@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import modal
 from dotenv import dotenv_values
@@ -111,6 +111,32 @@ def _download(sandbox: modal.Sandbox, repo_relative_path: str) -> Path:
     return local_path
 
 
+def _upload(sandbox: modal.Sandbox, local_path: Path, repo_relative_path: str) -> None:
+    """Copy one local file into the sandbox's repo checkout before the
+    command runs -- the upload-side mirror of _download(). For local-only
+    inputs the remote command needs but this repo doesn't track (e.g.
+    sae-bounding's per-feature identifiability CSV, gitignored there).
+
+    Rejects an absolute path or one containing a ".." component: this
+    project's own CLI is the only caller today, but the destination string
+    still shouldn't be able to write outside REPO_DIR if that ever changes.
+
+    Creates the destination's parent directory first, mirroring _download()'s
+    local-side mkdir(parents=True, exist_ok=True) -- a fresh git clone won't
+    contain an untracked or gitignored destination directory on its own.
+    """
+    relative = PurePosixPath(repo_relative_path)
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(
+            f"upload destination {repo_relative_path!r} must be a non-empty, "
+            "repository-relative path with no '..' components"
+        )
+    remote_path = f"{REPO_DIR}/{relative.as_posix()}"
+    remote_parent = remote_path.rsplit("/", 1)[0]
+    sandbox.filesystem.make_directory(remote_parent, create_parents=True)
+    sandbox.filesystem.copy_from_local(local_path, remote_path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--branch", required=True)
@@ -122,6 +148,15 @@ def main() -> None:
         action="append",
         default=[],
         help="repo-relative path to copy back after the command succeeds; repeatable",
+    )
+    parser.add_argument(
+        "--upload",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("LOCAL_PATH", "REPO_RELATIVE_PATH"),
+        help="copy a local file into the sandbox's repo checkout before running the "
+        "command; repeatable",
     )
     args = parser.parse_args()
 
@@ -147,6 +182,11 @@ def main() -> None:
                 step_name="git clone",
             )
             _run_step(sandbox, "pip", "install", "-e", ".", workdir=REPO_DIR, step_name="pip install")
+
+            for local_path, repo_relative_path in args.upload:
+                _upload(sandbox, Path(local_path), repo_relative_path)
+                print(f"[modal_run] uploaded {local_path} -> {repo_relative_path}")
+
             _run_step(sandbox, "bash", "-c", args.command, workdir=REPO_DIR, step_name="command")
 
             print(f"\n[modal_run] command succeeded on {args.gpu}")

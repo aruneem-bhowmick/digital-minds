@@ -40,6 +40,7 @@ DEFAULT_CORPUS_DATASET = "NeelNanda/pile-10k"
 DEFAULT_CORPUS_REVISION = "127bfedcd5047750df5ccf3a12979a47bfa0bafa"
 DEFAULT_N_DOCUMENTS = 500
 DEFAULT_MAX_TOKENS_PER_DOCUMENT = 256
+DEFAULT_DEVICE = "cpu"
 
 
 def build_feature_audit_table(
@@ -50,7 +51,7 @@ def build_feature_audit_table(
     max_tokens_per_document: int = DEFAULT_MAX_TOKENS_PER_DOCUMENT,
     corpus_dataset: str = DEFAULT_CORPUS_DATASET,
     corpus_revision: str = DEFAULT_CORPUS_REVISION,
-    device: str = "cpu",
+    device: str = DEFAULT_DEVICE,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Join identifiability, decoder norm, and activation frequency into one table.
 
@@ -123,6 +124,7 @@ def build_feature_audit_table(
         "identifiability_source_repo": source_config["repo"],
         "identifiability_source_commit": source_config["commit"],
         "identifiability_source_sha256": actual_sha256,
+        "device": device,
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True, cwd=_REPO_ROOT
         ).strip(),
@@ -180,6 +182,14 @@ def main() -> None:
     )
     parser.add_argument("--corpus-dataset", default=DEFAULT_CORPUS_DATASET)
     parser.add_argument("--corpus-revision", default=DEFAULT_CORPUS_REVISION)
+    parser.add_argument(
+        "--device",
+        default=DEFAULT_DEVICE,
+        choices=["cpu", "cuda"],
+        help="passed straight to load_model_and_sae(); defaults to 'cpu' to match "
+        "this project's Pythia runs -- a Modal GPU invocation must pass 'cuda' "
+        "explicitly (load_model_and_sae() does not auto-detect it)",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
@@ -192,6 +202,7 @@ def main() -> None:
         max_tokens_per_document=args.max_tokens_per_document,
         corpus_dataset=args.corpus_dataset,
         corpus_revision=args.corpus_revision,
+        device=args.device,
     )
 
     output_path = Path(args.output)
