@@ -336,6 +336,30 @@ Both schemas are enforced via `output_config.format` (structured JSON output), n
 
 ---
 
+## ADR-0020: REQ-9 resolution — detection-correct target, trial subset, and covariate standardization
+
+**Context:** `SPRINT-PLAN.md` §3.6 specifies a logistic regression of "trial-level detection-correct (binary)" on `identifiability_score`, with `decoder_norm`, `activation_frequency`, and `strength` as covariates, but does not spell out which trials feed that regression or exactly which judge-graded criterion "detection-correct" means. Three gaps surfaced once `stats.py` needed real values, not a plausible-looking guess, for each:
+
+1. `data/trials/trials.jsonl` holds three `prompt_type`s. `baseline` trials carry `strength: null` (nothing was injected), and `control` trials are graded against a different judge schema entirely (`judge_affirmative`/`judge_coherent`, no `judge_detected` field, since there is no injected concept to detect). Neither has both a real strength value and a detection judgment.
+2. Lindsey's four criteria include both affirmative detection and correct naming of the injected concept. ADR-0018's human-validated run (`.claude/flagged-decisions.md` #11) found zero real naming turns anywhere in the dataset — every naming-eligible trial's `judge_concept_identified` is `null` — so a target requiring naming accuracy would be undefined for every row, not merely rare.
+3. The four covariates span several orders of magnitude on their raw scale (`activation_frequency` around 1e-3, `decoder_norm` around 1, `strength` up to 8), and `data/results/judge_validation_sample.md` already established that only 1 of 474 non-excluded `detection`-type trials was graded `judge_detected: true` — a rare-event class imbalance that a scale mismatch can compound into a solver that fails to converge.
+
+**Decision:**
+
+`fit_inference_model()` and `compare_classifiers()` both restrict to `prompt_type == "detection"` trials only. `baseline` and `control` remain useful as their own descriptive checks (false-positive rate, affirmative-response bias) — covered by inspecting `judge_detected`/`judge_affirmative` directly, not by folding them into this fit — but neither is an input to the primary regression or the AUC comparison.
+
+The binary `detection_correct` target is `judge_detected` alone: Lindsey's affirmative-detection criterion, not a conjunction with `judge_concept_identified`. This is the only version of "detection-correct" this dataset can actually operationalize; requiring naming accuracy on top of it would silently turn the regression into a test of a criterion with zero real data behind it, which is a worse failure mode than a permissive target.
+
+Covariates are z-scored (mean-centered, divided by population standard deviation) before fitting, and coefficients are reported in per-standard-deviation units with the standardization (`mean`, `std` per covariate) recorded alongside them, so a raw-unit estimate can always be recovered. `fit_inference_model()` does not raise on a convergence failure — a failed or degenerate fit is a real, reportable result on data this sparse, and the returned record always states whether `statsmodels` reported convergence.
+
+Run against the real dataset (474 `detection`-type trials, 1 graded `judge_detected: true`), `sm.Logit` reports `converged: True` but with 95% CIs wide enough to be uninformative on their own — e.g. `identifiability_score`'s coefficient is `0.50` with a CI of `[-1.19, 2.20]`. `compare_classifiers()` finds `decoder_norm` alone reaches a higher in-sample AUC (`0.76`) than `identifiability_score` alone (`0.63`) at ranking the single positive trial above the negatives. Both are honestly-computed, non-fabricated numbers from a one-positive-case fit, not evidence of a coding error — `SPRINT-PLAN.md` §5's risk register already treats exactly this outcome ("H1 shows no signal after Phase 1") as a valid result to report, reframed around what `compare_classifiers()` shows instead of identifiability. `compare_classifiers()` scores in-sample rather than on a held-out split, since a single positive trial cannot be split across folds without at least one fold containing zero positives, which would make a held-out AUC measure nothing a held-out split is meant to measure.
+
+**Alternatives considered:** Requiring `judge_concept_identified` as part of `detection_correct` (rejected — undefined for the entire dataset, per point 2 above, not merely a stricter target). Including `baseline` trials in the same fit with `strength` imputed to `0` (rejected — conflates "no injection happened" with "injection happened at zero strength," a different experimental condition than what `SPRINT-PLAN.md` §3.3's injection protocol describes, and baseline's own purpose — measuring the false-positive rate — is better served as an independent descriptive check than folded into covariates it doesn't share). Leaving covariates on their raw scale (rejected — the scale mismatch is large enough, combined with the rare-event imbalance, to risk a solver failure that would be indistinguishable from a real null result without standardization to rule the scale mismatch out first). Switching to a penalized estimator (e.g. Firth logistic regression) to handle the rare-event imbalance (rejected for now — ADR-0006 pins `statsmodels`' ordinary MLE `Logit` specifically for its standard-CI reporting, and the real fit above converged without needing one; revisit only if a future run hits an actual convergence failure, as a proposed methodology change rather than a silent swap).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
