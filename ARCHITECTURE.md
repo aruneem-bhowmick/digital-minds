@@ -360,6 +360,18 @@ Run against the real dataset (474 `detection`-type trials, 1 graded `judge_detec
 
 ---
 
+## ADR-0021: REQ-10 resolution — the UCARE trajectory is unavailable, fallback stays primary
+
+**Context:** ADR-0009 named the UCARE intrinsic-dimension trajectory as the intended source of the primary injection layer, with the ADR-0009 fractional-depth fallback as an explicit stand-in until that trajectory was supplied. `SPRINT-PLAN.md` §2 item 10 describes this trajectory as "your UCARE work (intrinsic dimension, three-phase depth structure)" — a separate piece of prior research, not an artifact either this repo or `sae-bounding` produces or stores. A search across this repo, `ARCHITECTURE.md`/`SPRINT-PLAN.md`, and `sae-bounding`'s full file tree found no trajectory data, no code that computes one, and no reference to where one might already exist outside these two repos.
+
+**Decision:** REQ-10 does not run this session. `layers.py`'s `get_compression_boundary_layer()` stays unimplemented, exactly as its own docstring already states ("REQ-10's own scope and is not implemented here yet; it needs that trajectory as an external input"). The ADR-0009 fractional-depth fallback (`get_fallback_layer()`, layer 4 on Pythia-70m-deduped's six blocks) remains the primary injection site for every trial run this session and every one before it. This is recorded as a data-availability block, not a scope cut decided under time pressure the way REQ-11's Gemma Scope injection depth or trial count were: the trajectory genuinely does not exist anywhere accessible, so there is nothing to trade off against.
+
+**Alternatives considered:** Approximating the compression-phase boundary from a proxy computed inside this project instead of the real UCARE trajectory (rejected — ADR-0009 already treats the trajectory as an external input specifically to avoid re-deriving it from scratch here, and a proxy computed under time pressure risks presenting an approximation as the geometry-grounded choice ADR-0009 describes, which CLAUDE.md's non-negotiables rule out). Silently leaving REQ-10 off `data/results/req_status.md` (rejected — indistinguishable from an oversight; the whole point of that file is to make every gap explicit).
+
+**Status:** Accepted.
+
+---
+
 ## Implementation Strategy: Build Order
 
 Maps directly onto the SPEC's phases (`digital-minds-sprint-plan.md` §4). Build in this order — later modules depend on earlier ones, and building out of order risks writing against an interface that hasn't stabilized yet.
