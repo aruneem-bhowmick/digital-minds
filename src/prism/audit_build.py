@@ -40,6 +40,7 @@ DEFAULT_CORPUS_DATASET = "NeelNanda/pile-10k"
 DEFAULT_CORPUS_REVISION = "127bfedcd5047750df5ccf3a12979a47bfa0bafa"
 DEFAULT_N_DOCUMENTS = 500
 DEFAULT_MAX_TOKENS_PER_DOCUMENT = 256
+DEFAULT_DEVICE = "cpu"
 
 
 def build_feature_audit_table(
@@ -50,7 +51,7 @@ def build_feature_audit_table(
     max_tokens_per_document: int = DEFAULT_MAX_TOKENS_PER_DOCUMENT,
     corpus_dataset: str = DEFAULT_CORPUS_DATASET,
     corpus_revision: str = DEFAULT_CORPUS_REVISION,
-    device: str = "cpu",
+    device: str = DEFAULT_DEVICE,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Join identifiability, decoder norm, and activation frequency into one table.
 
@@ -183,7 +184,8 @@ def main() -> None:
     parser.add_argument("--corpus-revision", default=DEFAULT_CORPUS_REVISION)
     parser.add_argument(
         "--device",
-        default="cpu",
+        default=DEFAULT_DEVICE,
+        choices=["cpu", "cuda"],
         help="passed straight to load_model_and_sae(); defaults to 'cpu' to match "
         "this project's Pythia runs -- a Modal GPU invocation must pass 'cuda' "
         "explicitly (load_model_and_sae() does not auto-detect it)",
