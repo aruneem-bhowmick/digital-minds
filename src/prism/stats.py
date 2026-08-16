@@ -366,6 +366,11 @@ def main() -> None:
     print(f"wrote {regression_results_path} (converged={regression['converged']})")
 
     auc_table = compare_classifiers(table, validation_flag_path=args.validation_flag_path)
+    auc_table = auc_table.assign(
+        trials_path=str(args.trials_path),
+        git_commit=_git_commit(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
     auc_comparison_path = Path(args.auc_comparison_path)
     auc_comparison_path.parent.mkdir(parents=True, exist_ok=True)
     auc_table.to_csv(auc_comparison_path, index=False)
