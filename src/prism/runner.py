@@ -575,6 +575,14 @@ def main() -> None:
         default="systematic,baseline,control",
         help="comma-separated subset of: systematic, baseline, control",
     )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="passed straight to load_model_and_sae(); defaults to 'cpu' -- a Modal GPU "
+        "invocation must pass 'cuda' explicitly (load_model_and_sae() does not "
+        "auto-detect it, see ADR-0023)",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
@@ -584,7 +592,7 @@ def main() -> None:
     if max_new_tokens is None:
         max_new_tokens = int(config.get("generation", {}).get("max_new_tokens", DEFAULT_MAX_NEW_TOKENS))
 
-    loaded = load_model_and_sae(config)
+    loaded = load_model_and_sae(config, device=args.device)
     sampled_features = pd.read_csv(args.sampled_features)
     trial_types = {t.strip() for t in args.trial_types.split(",") if t.strip()}
 

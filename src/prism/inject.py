@@ -456,12 +456,20 @@ def main() -> None:
     parser.add_argument("--n-features", type=int, default=5)
     parser.add_argument("--max-new-tokens", type=int, default=60)
     parser.add_argument("--output", default="data/results/calibration_pilot.jsonl")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="passed straight to load_model_and_sae(); defaults to 'cpu' -- a Modal GPU "
+        "invocation must pass 'cuda' explicitly (load_model_and_sae() does not "
+        "auto-detect it, see ADR-0023)",
+    )
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
-    loaded = load_model_and_sae(config)
+    loaded = load_model_and_sae(config, device=args.device)
     sampled = pd.read_csv(args.sampled_features)
     seed = config.get("features", {}).get("sample_seed", 0)
     pilot_features = select_pilot_features(sampled, n_features=args.n_features, seed=seed)
