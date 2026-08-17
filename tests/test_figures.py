@@ -26,10 +26,12 @@ from prism.figures import (
     layer_comparison_available,
     main,
     make_calibration_figure,
+    make_detection_rate_figure,
     make_identifiability_detection_figure,
     make_layer_comparison_figure_if_available,
     predicted_detection_curve,
     summarize_calibration_pilot,
+    summarize_detection_rates,
 )
 
 # --- fixtures -----------------------------------------------------------------
@@ -65,6 +67,7 @@ def _analysis_table(n_negative: int = 20, n_positive: int = 1) -> pd.DataFrame:
             "identifiability_score": scores,
             "judge_detected": detected,
             "layer": [4] * (n_negative + n_positive),
+            "model_name": ["test-model"] * (n_negative + n_positive),
         }
     )
 
@@ -245,6 +248,51 @@ def test_make_calibration_figure_raises_without_a_precomputed_summary(tmp_path: 
         make_calibration_figure(pilot_path, None, output_dir=tmp_path / "figures")
 
 
+# --- summarize_detection_rates() / make_detection_rate_figure() --------------
+
+
+def test_summarize_detection_rates_reports_exact_per_model_counts() -> None:
+    table = pd.DataFrame(
+        {
+            "prompt_type": ["detection", "detection", "detection", "control"],
+            "model_name": ["pythia", "pythia", "gemma", "gemma"],
+            "judge_detected": [False, True, True, True],
+        }
+    )
+
+    summary = summarize_detection_rates(table)
+
+    assert summary.to_dict("records") == [
+        {"model_name": "gemma", "n_trials": 1, "n_detected": 1, "detection_rate": 1.0},
+        {"model_name": "pythia", "n_trials": 2, "n_detected": 1, "detection_rate": 0.5},
+    ]
+
+
+def test_summarize_detection_rates_raises_without_detection_rows() -> None:
+    table = pd.DataFrame(
+        {"prompt_type": ["control"], "model_name": ["gemma"], "judge_detected": [False]}
+    )
+
+    with pytest.raises(ValueError, match="detection"):
+        summarize_detection_rates(table)
+
+
+def test_make_detection_rate_figure_writes_svg_and_png(tmp_path: Path) -> None:
+    summary = pd.DataFrame(
+        {
+            "model_name": ["pythia", "gemma"],
+            "n_trials": [10, 10],
+            "n_detected": [1, 2],
+            "detection_rate": [0.1, 0.2],
+        }
+    )
+
+    paths = make_detection_rate_figure(summary, output_dir=tmp_path)
+
+    assert {path.suffix for path in paths} == {".svg", ".png"}
+    assert all(path.exists() and path.stat().st_size > 0 for path in paths)
+
+
 # --- layer_comparison_available() / make_layer_comparison_figure_if_available() ---
 
 
@@ -294,7 +342,7 @@ def test_layer_comparison_figure_raises_when_real_multi_layer_data_appears(tmp_p
 # --- main() (CLI) ---------------------------------------------------------------
 
 
-def test_main_writes_the_two_available_figures_and_skips_the_third(
+def test_main_writes_the_available_figures_and_skips_the_layer_comparison(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     analysis_table_path = tmp_path / "analysis_table.csv"
@@ -308,6 +356,7 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
 
     output_dir = tmp_path / "figures"
     calibration_summary_path = tmp_path / "calibration_summary.csv"
+    detection_rate_summary_path = tmp_path / "detection_rate_summary.csv"
 
     monkeypatch.setattr(
         sys,
@@ -318,6 +367,8 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
             "--analysis-table-path", str(analysis_table_path),
             "--calibration-pilot-path", str(calibration_pilot_path),
             "--calibration-summary-path", str(calibration_summary_path),
+            "--detection-rate-analysis-table-path", str(analysis_table_path),
+            "--detection-rate-summary-path", str(detection_rate_summary_path),
             "--output-dir", str(output_dir),
         ],
     )
@@ -326,6 +377,8 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
 
     written = sorted(p.name for p in output_dir.glob("*"))
     assert written == [
+        "detection_rate_by_model.png",
+        "detection_rate_by_model.svg",
         "identifiability_vs_detection.png",
         "identifiability_vs_detection.svg",
         "strength_calibration.png",
@@ -334,6 +387,7 @@ def test_main_writes_the_two_available_figures_and_skips_the_third(
     assert calibration_summary_path.exists()
     summary = pd.read_csv(calibration_summary_path)
     assert sorted(summary["strength"]) == [1.0, 2.0, 4.0, 8.0]
+    assert detection_rate_summary_path.exists()
 
     captured = capsys.readouterr()
     assert "skipped layer-comparison figure" in captured.out

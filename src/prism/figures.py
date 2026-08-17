@@ -19,6 +19,8 @@ Three figures are in scope per Prompt 11:
 3. ``make_layer_comparison_figure_if_available()`` -- REQ-10 (stretch), only
    if the analysis table actually has trials at more than one layer. It
    doesn't this session, so this returns no files and logs why.
+4. ``make_detection_rate_figure()`` -- a compact descriptive comparison of
+   the final per-model detection rates, drawn from a persisted summary.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ DEFAULT_REGRESSION_RESULTS_PATH = "data/results/regression_results.json"
 DEFAULT_ANALYSIS_TABLE_PATH = "data/results/analysis_table.csv"
 DEFAULT_CALIBRATION_PILOT_PATH = "data/results/calibration_pilot.jsonl"
 DEFAULT_CALIBRATION_SUMMARY_PATH = "data/results/calibration_summary.csv"
+DEFAULT_DETECTION_RATE_SUMMARY_PATH = "data/results/detection_rate_summary.csv"
 DEFAULT_FIGURES_DIR = "data/results/figures"
 
 # Colors are the dataviz skill's validated default palette instance
@@ -230,7 +233,7 @@ def make_identifiability_detection_figure(
     ax.set_yticklabels(["not detected", "detected"])
     ax.set_xlabel("identifiability score", color=COLOR_SECONDARY_INK)
     ax.set_title(
-        "Identifiability shows no detectable relationship to detection here",
+        "Pythia detection trials by feature identifiability",
         color=COLOR_PRIMARY_INK,
         fontsize=12,
         loc="left",
@@ -242,8 +245,9 @@ def make_identifiability_detection_figure(
     ax.text(
         0.0,
         1.04,
-        f"n={n_trials} detection trials, {n_detections} graded detected. "
-        f"coefficient {coef['estimate']:.2f}, 95% CI [{coef['ci_low']:.2f}, {coef['ci_high']:.2f}]",
+        "Identifiability shows no detectable relationship to detection in this dataset. "
+        f"n={n_trials} trials, {n_detections} graded detected; coefficient {coef['estimate']:.2f}, "
+        f"95% CI [{coef['ci_low']:.2f}, {coef['ci_high']:.2f}]",
         transform=ax.transAxes,
         fontsize=8.5,
         color=COLOR_MUTED_INK,
@@ -380,15 +384,150 @@ def make_calibration_figure(
     ax.set_xlabel("injection strength", color=COLOR_SECONDARY_INK)
     ax.set_ylabel("words generated (of 60 requested)", color=COLOR_SECONDARY_INK)
     ax.set_title(
-        "Response length collapses at high injection strength (REQ-5 pilot)",
+        "Pythia injection-strength calibration",
         color=COLOR_PRIMARY_INK,
         fontsize=12,
         loc="left",
-        pad=12,
+        pad=28,
     )
-    ax.legend(loc="upper right", frameon=False, fontsize=8, labelcolor=COLOR_SECONDARY_INK)
+    ax.text(
+        0.0,
+        1.04,
+        "Response length collapses at high injection strength; the shaded band was used for the systematic run.",
+        transform=ax.transAxes,
+        fontsize=8.5,
+        color=COLOR_MUTED_INK,
+        va="bottom",
+    )
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.23),
+        frameon=False,
+        fontsize=8,
+        labelcolor=COLOR_SECONDARY_INK,
+        ncols=1,
+    )
+    fig.subplots_adjust(bottom=0.28)
 
     return _save_figure(fig, Path(output_dir), "strength_calibration")
+
+
+# --- Per-model detection-rate figure -----------------------------------------
+
+
+def summarize_detection_rates(analysis_table: pd.DataFrame) -> pd.DataFrame:
+    """Return one descriptive detection-rate row per model.
+
+    This is deliberately a separate precomputation step.  The plotted rate
+    is a property of the cleaned trial ledger, while the figure only reads
+    the resulting summary.  The output is descriptive: it does not adjust
+    for the differing SAE, hook point, strength range, or sample design.
+    """
+    required = {"prompt_type", "model_name", "judge_detected"}
+    missing = required - set(analysis_table.columns)
+    if missing:
+        raise ValueError(f"analysis_table is missing required column(s): {sorted(missing)}")
+
+    detection = analysis_table.loc[analysis_table["prompt_type"] == "detection"].copy()
+    if detection.empty:
+        raise ValueError("analysis_table has no prompt_type == 'detection' rows to summarize")
+    if detection["model_name"].isna().any():
+        raise ValueError("analysis_table has detection rows without a model_name")
+
+    detection["judge_detected"] = detection["judge_detected"].astype(bool)
+    summary = (
+        detection.groupby("model_name", sort=True)["judge_detected"]
+        .agg(n_trials="size", n_detected="sum")
+        .reset_index()
+    )
+    summary["detection_rate"] = summary["n_detected"] / summary["n_trials"]
+    return summary
+
+
+def save_detection_rate_summary(
+    summary: pd.DataFrame,
+    output_path: "str | Path" = DEFAULT_DETECTION_RATE_SUMMARY_PATH,
+) -> Path:
+    """Persist a precomputed per-model detection-rate summary for plotting."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(output_path, index=False)
+    return output_path
+
+
+def make_detection_rate_figure(
+    detection_rate_summary: pd.DataFrame,
+    output_dir: "str | Path" = DEFAULT_FIGURES_DIR,
+) -> list[Path]:
+    """Draw a descriptive per-model detection-rate chart from a summary.
+
+    No uncertainty interval or significance annotation is drawn because
+    the two rows come from materially different intervention regimes.  The
+    chart makes the observed rate contrast legible without implying a
+    controlled architecture comparison.
+    """
+    required = {"model_name", "n_trials", "n_detected", "detection_rate"}
+    missing = required - set(detection_rate_summary.columns)
+    if missing:
+        raise ValueError(f"detection_rate_summary is missing required column(s): {sorted(missing)}")
+    if detection_rate_summary.empty:
+        raise ValueError("detection_rate_summary has no rows to plot")
+
+    summary = detection_rate_summary.sort_values("detection_rate").reset_index(drop=True)
+    display_names = summary["model_name"].map(
+        lambda value: "Pythia-70m" if "pythia" in value.lower() else "Gemma-2-2b" if "gemma" in value.lower() else value
+    )
+
+    fig, ax = plt.subplots(figsize=(6.7, 3.65))
+    _apply_base_style(ax)
+    bars = ax.bar(
+        display_names,
+        summary["detection_rate"] * 100,
+        color=[COLOR_SECONDARY_INK, COLOR_SERIES_BLUE],
+        width=0.56,
+        zorder=3,
+    )
+    y_max = max(float((summary["detection_rate"] * 100).max()) * 1.38, 1.0)
+    ax.set_ylim(0, y_max)
+    ax.set_ylabel("judge-scored detections (%)", color=COLOR_SECONDARY_INK)
+    ax.set_title(
+        "Judge-scored detection rate by model",
+        color=COLOR_PRIMARY_INK,
+        fontsize=12,
+        loc="left",
+        pad=28,
+    )
+    ax.text(
+        0.0,
+        1.04,
+        "Gemma had more detected trials under a different intervention regime.",
+        transform=ax.transAxes,
+        fontsize=8.5,
+        color=COLOR_MUTED_INK,
+        va="bottom",
+    )
+    for bar, row in zip(bars, summary.itertuples(index=False)):
+        rate_percent = row.detection_rate * 100
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            rate_percent + y_max * 0.035,
+            f"{int(row.n_detected)}/{int(row.n_trials)} ({rate_percent:.1f}%)",
+            ha="center",
+            va="bottom",
+            color=COLOR_PRIMARY_INK,
+            fontsize=9,
+        )
+    ax.text(
+        0.0,
+        -0.24,
+        "Descriptive only: SAE checkpoint, injection site, strengths, and sample design differ by model.",
+        transform=ax.transAxes,
+        fontsize=8.3,
+        color=COLOR_MUTED_INK,
+        va="top",
+    )
+    fig.subplots_adjust(bottom=0.25)
+    return _save_figure(fig, Path(output_dir), "detection_rate_by_model")
 
 
 # --- Layer-comparison figure (REQ-10, conditional) ----------------------------
@@ -452,8 +591,10 @@ def main() -> None:
     Reads ``regression_results.json``, ``analysis_table.csv``, and
     ``calibration_pilot.jsonl`` from ``data/results/``; also writes
     ``calibration_summary.csv`` (the one precomputation step this module
-    owns) before the calibration figure reads it back. Writes every figure
-    that has real data behind it to ``data/results/figures/``.
+    owns) before the calibration figure reads it back.  A per-model rate
+    figure is generated only when the caller explicitly supplies its
+    combined analysis-table path, so a Pythia-only run cannot overwrite
+    the cross-model report artifact.
     """
     import argparse
 
@@ -465,6 +606,8 @@ def main() -> None:
     parser.add_argument("--calibration-pilot-path", default=DEFAULT_CALIBRATION_PILOT_PATH)
     parser.add_argument("--calibration-summary-path", default=DEFAULT_CALIBRATION_SUMMARY_PATH)
     parser.add_argument("--output-dir", default=DEFAULT_FIGURES_DIR)
+    parser.add_argument("--detection-rate-analysis-table-path")
+    parser.add_argument("--detection-rate-summary-path", default=DEFAULT_DETECTION_RATE_SUMMARY_PATH)
     args = parser.parse_args()
 
     analysis_table = pd.read_csv(args.analysis_table_path)
@@ -479,6 +622,16 @@ def main() -> None:
     print(f"wrote {summary_path}")
     for path in make_calibration_figure(args.calibration_pilot_path, calibration_summary, args.output_dir):
         print(f"wrote {path}")
+
+    if args.detection_rate_analysis_table_path:
+        detection_rate_table = pd.read_csv(args.detection_rate_analysis_table_path)
+        detection_rate_summary = summarize_detection_rates(detection_rate_table)
+        detection_rate_path = save_detection_rate_summary(detection_rate_summary, args.detection_rate_summary_path)
+        print(f"wrote {detection_rate_path}")
+        for path in make_detection_rate_figure(detection_rate_summary, args.output_dir):
+            print(f"wrote {path}")
+    else:
+        print("skipped detection-rate figure -- no combined analysis table was supplied")
 
     layer_figures = make_layer_comparison_figure_if_available(analysis_table, args.output_dir)
     if not layer_figures:
