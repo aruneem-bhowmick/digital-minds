@@ -471,6 +471,7 @@ def validate_judge_subsample(
     *,
     seed: int = 0,
     output_path: "str | Path | None" = DEFAULT_VALIDATION_SAMPLE_PATH,
+    model_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Sample ``n`` scored trials and pair each with its judge grade for human
     review (REQ-8).
@@ -480,11 +481,24 @@ def validate_judge_subsample(
     a gate: it never writes ``judge_validated.flag`` itself -- see
     ``write_validation_flag()`` for the function that does, which only runs
     on an explicit human confirmation.
+
+    ``model_name``, when given, restricts the pool to one model's trials
+    before sampling (REQ-11): once ``trials_path`` holds more than one
+    model's trials, an unfiltered sample is drawn proportionally to each
+    model's share of the file, which mostly re-samples whichever model has
+    already been validated rather than the model a caller actually wants to
+    review.
     """
     records = _read_all_records(trials_path)
     scored = [r for r in records if r.get("judge_scores") is not None]
+    if model_name is not None:
+        scored = [r for r in scored if r.get("model_name") == model_name]
     if not scored:
-        raise ValueError(f"{trials_path} has no scored trials yet -- run score_all_pending() first")
+        raise ValueError(
+            f"{trials_path} has no scored trials yet"
+            + (f" for model_name={model_name!r}" if model_name is not None else "")
+            + " -- run score_all_pending() first"
+        )
 
     rng = random.Random(seed)
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -610,13 +624,29 @@ def main() -> None:
     parser.add_argument("--validation-sample-path", default=DEFAULT_VALIDATION_SAMPLE_PATH)
     parser.add_argument("--validation-sample-size", type=int, default=15)
     parser.add_argument(
+        "--validate-model-name",
+        default=None,
+        help="restrict the validate step's sample to one model's trials (REQ-11); with "
+        "trials from more than one model in --trials-path, an unfiltered sample is drawn "
+        "proportionally to each model's share of the file and mostly re-samples whichever "
+        "model was already validated",
+    )
+    parser.add_argument(
         "--steps", default="grounding,score,validate", help="comma-separated subset of: grounding, score, validate"
     )
     parser.add_argument(
         "--confirm-validated",
         default=None,
         metavar="NOTE",
-        help="write data/results/judge_validated.flag with this reviewer note, and do nothing else",
+        help="write a judge_validated flag with this reviewer note, and do nothing else",
+    )
+    parser.add_argument(
+        "--flag-output-path",
+        default=DEFAULT_VALIDATION_FLAG_PATH,
+        help="where --confirm-validated writes its flag; defaults to Pythia's own "
+        "data/results/judge_validated.flag -- pass a model-specific path (e.g. "
+        "judge_validated_gemma.flag) so a second model's confirmation doesn't overwrite "
+        "the first model's",
     )
     parser.add_argument(
         "--device",
@@ -636,12 +666,15 @@ def main() -> None:
             sample_size = _count_report_trials(report_path)
         else:
             records = _read_all_records(args.trials_path)
-            n_scored = sum(1 for r in records if r.get("judge_scores") is not None)
-            sample_size = min(args.validation_sample_size, n_scored)
+            scored = [r for r in records if r.get("judge_scores") is not None]
+            if args.validate_model_name is not None:
+                scored = [r for r in scored if r.get("model_name") == args.validate_model_name]
+            sample_size = min(args.validation_sample_size, len(scored))
         path = write_validation_flag(
             args.confirm_validated,
             trials_path=args.trials_path,
             sample_size=sample_size,
+            output_path=args.flag_output_path,
         )
         print(f"wrote {path}")
         return
@@ -678,7 +711,10 @@ def main() -> None:
 
     if "validate" in steps:
         validate_judge_subsample(
-            args.validation_sample_size, args.trials_path, output_path=args.validation_sample_path
+            args.validation_sample_size,
+            args.trials_path,
+            output_path=args.validation_sample_path,
+            model_name=args.validate_model_name,
         )
 
 
