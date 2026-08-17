@@ -2,9 +2,15 @@
 
 ``build_analysis_table()`` joins every non-excluded trial in
 ``data/trials/trials.jsonl`` onto its feature's identifiability score,
-decoder norm, and activation frequency in ``data/audit/features.csv``,
-producing the single regression-ready table both analyses in this module
-consume (ADR-0005's consequence: one join, not one per caller).
+decoder norm, and activation frequency, producing the single
+regression-ready table both analyses in this module consume (ADR-0005's
+consequence: one join, not one per caller). ``data/trials/trials.jsonl``
+can hold more than one model's trials (REQ-11 added Gemma Scope
+alongside Pythia), and each model's own audit table indexes
+``feature_id`` independently starting at 0 -- so the join key is
+``(model_name, feature_id)``, not ``feature_id`` alone, and
+``audit_paths`` maps each trial-bearing model's name to its own audit
+CSV rather than pointing at a single default.
 
 ``fit_inference_model()`` and ``compare_classifiers()`` are the two
 analyses SPRINT-PLAN.md Section 3.6 and ADR-0006 call for: a statsmodels
@@ -13,10 +19,12 @@ comparison against the obvious decoder-norm confound. Both restrict to
 the systematic injection trials and derive their binary target from the
 judge's affirmative-detection field alone; see ADR-0020 for why.
 
-Every public function here refuses to run before
-``data/results/judge_validated.flag`` (REQ-8) exists -- CLAUDE.md's rule
-against treating an unvalidated judge as ground truth, enforced at each
-entry point rather than trusted to have been checked upstream.
+Every public function here refuses to run before every relevant model's
+own ``judge_validated*.flag`` (REQ-8) exists -- CLAUDE.md's rule against
+treating an unvalidated judge as ground truth, enforced at each entry
+point rather than trusted to have been checked upstream. A caller
+analyzing more than one model's trials passes every one of that model's
+flag paths, not just one.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from prism.features import load_feature_audit
 
 DEFAULT_TRIALS_PATH = "data/trials/trials.jsonl"
 DEFAULT_AUDIT_PATH = "data/audit/features.csv"
+DEFAULT_MODEL_NAME = "EleutherAI/pythia-70m-deduped"
 DEFAULT_VALIDATION_FLAG_PATH = "data/results/judge_validated.flag"
 
 DETECTION_TARGET_COLUMN = "detection_correct"
@@ -51,13 +60,19 @@ class JudgeNotValidatedError(RuntimeError):
     """
 
 
-def _require_judge_validated(validation_flag_path: "str | Path") -> None:
-    if not Path(validation_flag_path).exists():
+def _require_judge_validated(validation_flag_path: "str | Path | list[str | Path]") -> None:
+    """Accepts one path, or a list of paths when a caller is analyzing more
+    than one model's trials together (REQ-11) -- every one of them must
+    exist, since a combined-model table is only as validated as its
+    least-validated model.
+    """
+    paths = [validation_flag_path] if isinstance(validation_flag_path, (str, Path)) else list(validation_flag_path)
+    missing = [str(p) for p in paths if not Path(p).exists()]
+    if missing:
         raise JudgeNotValidatedError(
-            f"{validation_flag_path} does not exist -- run "
-            "judge.validate_judge_subsample() and judge.write_validation_flag() "
-            "(REQ-8) before trusting judge_scores as ground truth for any "
-            "downstream analysis"
+            f"{missing} do not exist -- run judge.validate_judge_subsample() and "
+            "judge.write_validation_flag() (REQ-8) for every model this analysis "
+            "covers before trusting judge_scores as ground truth"
         )
 
 
@@ -76,9 +91,9 @@ def _read_trials(path: "str | Path") -> list[dict[str, Any]]:
 
 def build_analysis_table(
     trials_path: "str | Path" = DEFAULT_TRIALS_PATH,
-    audit_path: "str | Path" = DEFAULT_AUDIT_PATH,
     *,
-    validation_flag_path: "str | Path" = DEFAULT_VALIDATION_FLAG_PATH,
+    audit_paths: dict[str, "str | Path"],
+    validation_flag_path: "str | Path | list[str | Path]" = DEFAULT_VALIDATION_FLAG_PATH,
 ) -> pd.DataFrame:
     """Join every non-excluded trial onto its feature's audit row.
 
@@ -90,11 +105,20 @@ def build_analysis_table(
     ``trial_id`` stays, so a row can always be traced back to its full
     transcript in ``trials_path`` if needed.
 
-    Raises ``JudgeNotValidatedError`` before touching a row of data if
-    ``validation_flag_path`` is missing, and ``ValueError`` if a
+    ``audit_paths`` maps each model_name present in ``trials_path`` to that
+    model's own audit CSV (REQ-11): ``feature_id`` is indexed 0..N-1
+    independently per SAE checkpoint, so two different models' dictionaries
+    can share the same ``feature_id`` values without meaning the same
+    feature -- the join key is ``(model_name, feature_id)``, not
+    ``feature_id`` alone, and there is no single sensible default audit
+    table once more than one model's trials can appear in the same file.
+
+    Raises ``JudgeNotValidatedError`` before touching a row of data if any
+    path in ``validation_flag_path`` is missing, and ``ValueError`` if a
     non-excluded trial has no judge score yet, or if a trial's
-    ``feature_id`` has no match in ``audit_path`` -- both mean an upstream
-    invariant broke, not something to paper over with a silent drop.
+    ``(model_name, feature_id)`` has no match in ``audit_paths`` -- both
+    mean an upstream invariant broke, not something to paper over with a
+    silent drop.
     """
     _require_judge_validated(validation_flag_path)
 
@@ -114,14 +138,25 @@ def build_analysis_table(
     judge_columns = pd.json_normalize(trials["judge_scores"].tolist()).add_prefix("judge_")
     trials = pd.concat([trials.drop(columns=["judge_scores", "model_response"]), judge_columns], axis=1)
 
-    audit = load_feature_audit(audit_path)
-    merged = trials.merge(audit, on="feature_id", how="left", validate="many_to_one", indicator=True)
-    unmatched = sorted(int(fid) for fid in merged.loc[merged["_merge"] == "left_only", "feature_id"].unique())
-    if unmatched:
+    audit_frames = []
+    for model_name, audit_path in audit_paths.items():
+        audit = load_feature_audit(audit_path).copy()
+        audit.insert(0, "model_name", model_name)
+        audit_frames.append(audit)
+    combined_audit = pd.concat(audit_frames, ignore_index=True)
+
+    merged = trials.merge(
+        combined_audit, on=["model_name", "feature_id"], how="left", validate="many_to_one", indicator=True
+    )
+    unmatched_rows = merged.loc[merged["_merge"] == "left_only", ["model_name", "feature_id"]].drop_duplicates()
+    if not unmatched_rows.empty:
+        unmatched = sorted(
+            (str(row.model_name), int(row.feature_id)) for row in unmatched_rows.itertuples(index=False)
+        )
         raise ValueError(
-            f"{trials_path} has trial(s) for feature_id(s) {unmatched} with no "
-            f"match in {audit_path} -- the audit table may be stale relative to "
-            "the sampled features"
+            f"{trials_path} has trial(s) for (model_name, feature_id) {unmatched} with no "
+            f"match in audit_paths -- the audit table may be stale relative to the sampled "
+            "features, or audit_paths is missing an entry for one of the trial file's models"
         )
     return merged.drop(columns=["_merge"])
 
@@ -181,7 +216,7 @@ def _add_detection_target(subset: pd.DataFrame) -> pd.DataFrame:
 def fit_inference_model(
     trials_df: pd.DataFrame,
     *,
-    validation_flag_path: "str | Path" = DEFAULT_VALIDATION_FLAG_PATH,
+    validation_flag_path: "str | Path | list[str | Path]" = DEFAULT_VALIDATION_FLAG_PATH,
 ) -> dict[str, Any]:
     """Logistic regression of detection-correct on identifiability_score,
     with decoder_norm, activation_frequency, and strength as covariates
@@ -270,7 +305,7 @@ def fit_inference_model(
 def compare_classifiers(
     trials_df: pd.DataFrame,
     *,
-    validation_flag_path: "str | Path" = DEFAULT_VALIDATION_FLAG_PATH,
+    validation_flag_path: "str | Path | list[str | Path]" = DEFAULT_VALIDATION_FLAG_PATH,
 ) -> pd.DataFrame:
     """AUC comparison between a classifier using only identifiability_score
     and one using only decoder_norm (SPRINT-PLAN.md Section 3.6, ADR-0006).
@@ -330,22 +365,40 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
-    parser.add_argument("--audit-path", default=DEFAULT_AUDIT_PATH)
-    parser.add_argument("--validation-flag-path", default=DEFAULT_VALIDATION_FLAG_PATH)
+    parser.add_argument(
+        "--audit-path",
+        action="append",
+        default=[],
+        metavar="MODEL_NAME=PATH",
+        help="one model's audit CSV, as MODEL_NAME=PATH; repeatable for a combined-model "
+        "analysis (REQ-11). Defaults to Pythia's own audit table alone if omitted entirely.",
+    )
+    parser.add_argument(
+        "--validation-flag-path",
+        action="append",
+        default=[],
+        help="a judge_validated*.flag path; repeatable, one per model this analysis covers. "
+        "Defaults to Pythia's own flag alone if omitted entirely.",
+    )
     parser.add_argument("--analysis-table-path", default="data/results/analysis_table.csv")
     parser.add_argument("--regression-results-path", default="data/results/regression_results.json")
     parser.add_argument("--auc-comparison-path", default="data/results/auc_comparison.csv")
     args = parser.parse_args()
 
+    audit_paths = {
+        model_name: path for model_name, path in (entry.split("=", 1) for entry in args.audit_path)
+    } or {DEFAULT_MODEL_NAME: DEFAULT_AUDIT_PATH}
+    validation_flag_paths = args.validation_flag_path or [DEFAULT_VALIDATION_FLAG_PATH]
+
     table = build_analysis_table(
-        args.trials_path, args.audit_path, validation_flag_path=args.validation_flag_path
+        args.trials_path, audit_paths=audit_paths, validation_flag_path=validation_flag_paths
     )
     analysis_table_path = Path(args.analysis_table_path)
     analysis_table_path.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(analysis_table_path, index=False)
     print(f"wrote {analysis_table_path} ({len(table)} rows)")
 
-    regression = fit_inference_model(table, validation_flag_path=args.validation_flag_path)
+    regression = fit_inference_model(table, validation_flag_path=validation_flag_paths)
     regression_record = {
         **regression,
         "trials_path": str(args.trials_path),
@@ -357,7 +410,7 @@ def main() -> None:
     regression_results_path.write_text(json.dumps(regression_record, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {regression_results_path} (converged={regression['converged']})")
 
-    auc_table = compare_classifiers(table, validation_flag_path=args.validation_flag_path)
+    auc_table = compare_classifiers(table, validation_flag_path=validation_flag_paths)
     auc_table = auc_table.assign(
         trials_path=str(args.trials_path),
         git_commit=_git_commit(),

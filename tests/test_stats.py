@@ -70,6 +70,7 @@ def _trial(
     judge_scores: "dict | None" = None,
     excluded: bool = False,
     exclusion_reason: "str | None" = None,
+    model_name: str = "EleutherAI/pythia-70m-deduped",
 ) -> dict:
     return {
         "trial_id": trial_id,
@@ -80,7 +81,7 @@ def _trial(
         "prompt_type": prompt_type,
         "seed": 0,
         "temperature": 1.0,
-        "model_name": "EleutherAI/pythia-70m-deduped",
+        "model_name": model_name,
         "model_checkpoint_revision": "e93a9fa",
         "sae_checkpoint_repo": "ghidav/pythia-70m-deduped-sae",
         "sae_checkpoint_revision": "473774a",
@@ -94,7 +95,7 @@ def _trial(
     }
 
 
-def _minimal_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _minimal_dataset(tmp_path: Path) -> tuple[Path, dict[str, Path], Path]:
     """One feature, three prompt_types, a mix of detected outcomes -- the
     smallest fixture that exercises the join, the exclusion filter, and the
     prompt_type split all at once.
@@ -127,24 +128,27 @@ def _minimal_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
             "activation_frequency": [0.001],
         },
     )
-    return trials_path, audit_path, _flag(tmp_path)
+    # Matches _trial()'s own hardcoded model_name -- the join key
+    # build_analysis_table() now uses (REQ-11) is (model_name, feature_id).
+    audit_paths = {"EleutherAI/pythia-70m-deduped": audit_path}
+    return trials_path, audit_paths, _flag(tmp_path)
 
 
 # --- build_analysis_table ------------------------------------------------------
 
 
 def test_build_analysis_table_raises_without_validation_flag(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
     flag_path.unlink()
 
-    with pytest.raises(JudgeNotValidatedError, match="does not exist"):
-        build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    with pytest.raises(JudgeNotValidatedError, match="do not exist"):
+        build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
 
 def test_build_analysis_table_joins_feature_metadata_onto_every_trial(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
 
-    table = build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
     assert (table["identifiability_score"] == 0.5).all()
     assert (table["decoder_norm"] == 1.0).all()
@@ -152,9 +156,9 @@ def test_build_analysis_table_joins_feature_metadata_onto_every_trial(tmp_path) 
 
 
 def test_build_analysis_table_flattens_judge_scores_into_columns(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
 
-    table = build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
     detection_row = table.loc[table["trial_id"] == "detection::f1::s1"].iloc[0]
     assert detection_row["judge_detected"] == True  # noqa: E712
@@ -163,9 +167,9 @@ def test_build_analysis_table_flattens_judge_scores_into_columns(tmp_path) -> No
 
 
 def test_build_analysis_table_drops_excluded_trials(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
 
-    table = build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
     assert "detection::f1::s4" not in set(table["trial_id"])
     assert len(table) == 4  # five records written, one excluded
@@ -176,10 +180,11 @@ def test_build_analysis_table_raises_on_non_excluded_trial_missing_judge_scores(
     _write_trials(trials_path, [_trial("detection::f1::s1", 1, judge_scores=None, excluded=False)])
     audit_path = tmp_path / "features.csv"
     _audit_csv(audit_path, {"feature_id": [1], "identifiability_score": [0.5], "decoder_norm": [1.0], "activation_frequency": [0.001]})
+    audit_paths = {"EleutherAI/pythia-70m-deduped": audit_path}
     flag_path = _flag(tmp_path)
 
     with pytest.raises(ValueError, match="no judge_scores yet"):
-        build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+        build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
 
 def test_build_analysis_table_raises_on_unmatched_feature_id(tmp_path) -> None:
@@ -187,18 +192,121 @@ def test_build_analysis_table_raises_on_unmatched_feature_id(tmp_path) -> None:
     _write_trials(trials_path, [_trial("detection::f99::s1", 99, judge_scores=_DETECTED_TRUE)])
     audit_path = tmp_path / "features.csv"
     _audit_csv(audit_path, {"feature_id": [1], "identifiability_score": [0.5], "decoder_norm": [1.0], "activation_frequency": [0.001]})
+    audit_paths = {"EleutherAI/pythia-70m-deduped": audit_path}
     flag_path = _flag(tmp_path)
 
-    with pytest.raises(ValueError, match=r"feature_id\(s\) \[99\]"):
-        build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    with pytest.raises(ValueError, match=r"\(model_name, feature_id\).*'EleutherAI/pythia-70m-deduped', 99"):
+        build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
+
+
+# --- build_analysis_table: (model_name, feature_id) join (REQ-11) --------------
+
+
+def test_build_analysis_table_joins_two_models_without_colliding_on_feature_id(tmp_path) -> None:
+    # Both models' dictionaries index feature_id 1 independently -- Pythia's
+    # feature 1 and Gemma's feature 1 are unrelated features with different
+    # covariate values. A feature_id-only join would silently pick one
+    # audit row (or raise a many_to_one violation); the (model_name,
+    # feature_id) join must keep both rows distinct.
+    trials_path = tmp_path / "trials.jsonl"
+    _write_trials(
+        trials_path,
+        [
+            _trial("detection::pythia::f1", 1, judge_scores=_DETECTED_TRUE, model_name="EleutherAI/pythia-70m-deduped"),
+            _trial("detection::gemma::f1", 1, judge_scores=_DETECTED_FALSE, model_name="google/gemma-2-2b"),
+        ],
+    )
+    pythia_audit_path = tmp_path / "pythia_features.csv"
+    _audit_csv(
+        pythia_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.5], "decoder_norm": [1.0], "activation_frequency": [0.001]},
+    )
+    gemma_audit_path = tmp_path / "gemma_features.csv"
+    _audit_csv(
+        gemma_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.9], "decoder_norm": [3.0], "activation_frequency": [0.05]},
+    )
+    audit_paths = {
+        "EleutherAI/pythia-70m-deduped": pythia_audit_path,
+        "google/gemma-2-2b": gemma_audit_path,
+    }
+    flag_path = _flag(tmp_path)
+
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
+
+    by_trial = table.set_index("trial_id")
+    assert by_trial.loc["detection::pythia::f1", "identifiability_score"] == 0.5
+    assert by_trial.loc["detection::pythia::f1", "decoder_norm"] == 1.0
+    assert by_trial.loc["detection::gemma::f1", "identifiability_score"] == 0.9
+    assert by_trial.loc["detection::gemma::f1", "decoder_norm"] == 3.0
+
+
+def test_build_analysis_table_raises_when_audit_paths_is_missing_a_present_model(tmp_path) -> None:
+    trials_path = tmp_path / "trials.jsonl"
+    _write_trials(
+        trials_path,
+        [_trial("detection::gemma::f1", 1, judge_scores=_DETECTED_TRUE, model_name="google/gemma-2-2b")],
+    )
+    pythia_audit_path = tmp_path / "pythia_features.csv"
+    _audit_csv(
+        pythia_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.5], "decoder_norm": [1.0], "activation_frequency": [0.001]},
+    )
+    # Only Pythia's audit table is given, even though this trial is Gemma's.
+    audit_paths = {"EleutherAI/pythia-70m-deduped": pythia_audit_path}
+    flag_path = _flag(tmp_path)
+
+    with pytest.raises(ValueError, match=r"'google/gemma-2-2b', 1"):
+        build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
+
+
+def test_require_judge_validated_accepts_a_list_and_requires_every_path(tmp_path) -> None:
+    trials_path = tmp_path / "trials.jsonl"
+    _write_trials(
+        trials_path,
+        [
+            _trial("detection::pythia::f1", 1, judge_scores=_DETECTED_TRUE, model_name="EleutherAI/pythia-70m-deduped"),
+            _trial("detection::gemma::f1", 1, judge_scores=_DETECTED_FALSE, model_name="google/gemma-2-2b"),
+        ],
+    )
+    pythia_audit_path = tmp_path / "pythia_features.csv"
+    _audit_csv(
+        pythia_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.5], "decoder_norm": [1.0], "activation_frequency": [0.001]},
+    )
+    gemma_audit_path = tmp_path / "gemma_features.csv"
+    _audit_csv(
+        gemma_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.9], "decoder_norm": [3.0], "activation_frequency": [0.05]},
+    )
+    audit_paths = {
+        "EleutherAI/pythia-70m-deduped": pythia_audit_path,
+        "google/gemma-2-2b": gemma_audit_path,
+    }
+    pythia_flag = _flag(tmp_path)
+    gemma_flag = tmp_path / "judge_validated_gemma.flag"
+    # Only Pythia's flag exists -- Gemma's own trials are not yet validated.
+
+    with pytest.raises(JudgeNotValidatedError, match="do not exist"):
+        build_analysis_table(
+            trials_path, audit_paths=audit_paths, validation_flag_path=[pythia_flag, gemma_flag]
+        )
+
+    gemma_flag.write_text(json.dumps({"reviewer_note": "reviewed gemma's sample"}) + "\n", encoding="utf-8")
+
+    # Both flags present now -- the same call succeeds.
+    table = build_analysis_table(
+        trials_path, audit_paths=audit_paths, validation_flag_path=[pythia_flag, gemma_flag]
+    )
+    assert len(table) == 2
 
 
 # --- _detection_subset / _add_detection_target ---------------------------------
 
 
 def test_detection_subset_filters_to_detection_prompt_type(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
-    table = build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
 
     subset = _detection_subset(table)
 
@@ -221,8 +329,8 @@ def test_detection_subset_raises_on_null_strength() -> None:
 
 
 def test_add_detection_target_matches_judge_detected(tmp_path) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
-    table = build_analysis_table(trials_path, audit_path, validation_flag_path=flag_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
+    table = build_analysis_table(trials_path, audit_paths=audit_paths, validation_flag_path=flag_path)
     subset = _detection_subset(table)
 
     with_target = _add_detection_target(subset)
@@ -477,7 +585,7 @@ def test_compare_classifiers_uses_the_same_subset_as_fit_inference_model(tmp_pat
 
 
 def test_main_writes_all_three_outputs_with_provenance(tmp_path, monkeypatch) -> None:
-    trials_path, audit_path, flag_path = _minimal_dataset(tmp_path)
+    trials_path, audit_paths, flag_path = _minimal_dataset(tmp_path)
     analysis_table_path = tmp_path / "analysis_table.csv"
     regression_results_path = tmp_path / "regression_results.json"
     auc_comparison_path = tmp_path / "auc_comparison.csv"
@@ -492,7 +600,7 @@ def test_main_writes_all_three_outputs_with_provenance(tmp_path, monkeypatch) ->
         [
             "prism.stats",
             "--trials-path", str(trials_path),
-            "--audit-path", str(audit_path),
+            "--audit-path", f"EleutherAI/pythia-70m-deduped={audit_paths['EleutherAI/pythia-70m-deduped']}",
             "--validation-flag-path", str(flag_path),
             "--analysis-table-path", str(analysis_table_path),
             "--regression-results-path", str(regression_results_path),
