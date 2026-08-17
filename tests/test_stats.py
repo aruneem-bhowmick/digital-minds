@@ -241,6 +241,33 @@ def test_build_analysis_table_joins_two_models_without_colliding_on_feature_id(t
     assert by_trial.loc["detection::gemma::f1", "decoder_norm"] == 3.0
 
 
+def test_build_analysis_table_can_select_one_model_from_a_shared_ledger(tmp_path) -> None:
+    trials_path = tmp_path / "trials.jsonl"
+    _write_trials(
+        trials_path,
+        [
+            _trial("detection::pythia::f1", 1, judge_scores=_DETECTED_TRUE, model_name="EleutherAI/pythia-70m-deduped"),
+            _trial("detection::gemma::f1", 1, judge_scores=_DETECTED_FALSE, model_name="google/gemma-2-2b"),
+        ],
+    )
+    gemma_audit_path = tmp_path / "gemma_features.csv"
+    _audit_csv(
+        gemma_audit_path,
+        {"feature_id": [1], "identifiability_score": [0.9], "decoder_norm": [3.0], "activation_frequency": [0.05]},
+    )
+    gemma_flag = _flag(tmp_path)
+
+    table = build_analysis_table(
+        trials_path,
+        audit_paths={"google/gemma-2-2b": gemma_audit_path},
+        validation_flag_path=gemma_flag,
+        model_name="google/gemma-2-2b",
+    )
+
+    assert table["model_name"].tolist() == ["google/gemma-2-2b"]
+    assert table["identifiability_score"].tolist() == [0.9]
+
+
 def test_build_analysis_table_raises_when_audit_paths_is_missing_a_present_model(tmp_path) -> None:
     trials_path = tmp_path / "trials.jsonl"
     _write_trials(

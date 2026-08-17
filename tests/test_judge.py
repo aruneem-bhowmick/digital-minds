@@ -370,12 +370,43 @@ def test_score_all_pending_clears_stale_exclusion_on_a_successful_retry(tmp_path
     _write_all_records(path, [previously_refused])
     client = _FakeJudgeClient([_CONTROL_SCORE])
 
-    score_all_pending(path, client)
+    score_all_pending(path, client, retry_refusals=True)
 
     record = _read_all_records(path)[0]
     assert record["judge_scores"] == _CONTROL_SCORE
     assert record["excluded"] is False
     assert record["exclusion_reason"] is None
+
+
+def test_score_all_pending_skips_previously_excluded_refusal_by_default(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    previously_refused = {
+        **_control_trial(),
+        "excluded": True,
+        "exclusion_reason": "judge refused to grade trial '...' (category='bio')",
+    }
+    _write_all_records(path, [previously_refused])
+
+    result = score_all_pending(path, _FakeJudgeClient([]))
+
+    assert result == {"scored": 0, "skipped": 1, "refused": 0}
+    record = _read_all_records(path)[0]
+    assert record["judge_scores"] is None
+    assert record["excluded"] is True
+
+
+def test_score_all_pending_scopes_records_to_the_requested_model(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    pythia = {**_control_trial(question_id="pythia"), "model_name": "pythia"}
+    gemma = {**_control_trial(question_id="gemma"), "model_name": "gemma"}
+    _write_all_records(path, [pythia, gemma])
+
+    result = score_all_pending(path, _FakeJudgeClient([_CONTROL_SCORE]), model_name="gemma")
+
+    assert result == {"scored": 1, "skipped": 1, "refused": 0}
+    records = {record["model_name"]: record for record in _read_all_records(path)}
+    assert records["pythia"]["judge_scores"] is None
+    assert records["gemma"]["judge_scores"] == _CONTROL_SCORE
 
 
 def test_score_all_pending_flushes_progress_on_finally_even_mid_batch(tmp_path) -> None:

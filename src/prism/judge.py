@@ -276,8 +276,16 @@ def score_all_pending(
     grounding: dict[str, list[dict[str, Any]]] | None = None,
     *,
     model: str = DEFAULT_JUDGE_MODEL,
+    model_name: str | None = None,
+    retry_refusals: bool = False,
 ) -> dict[str, int]:
-    """Score every trial in ``trials_path`` currently missing ``judge_scores`` (REQ-8).
+    """Score pending trials in ``trials_path`` (REQ-8).
+
+    ``model_name`` limits scoring to one experimental model, preventing a
+    second model's judge pass from silently revisiting records in a shared
+    trial file. Refused records are skipped by default even though their
+    ``judge_scores`` is intentionally null; retrying them requires the
+    explicit ``retry_refusals=True`` opt-in.
 
     Fills in ``judge_scores`` on the existing line for each pending trial --
     ADR-0005's append-only convention governs *new* trials, not a
@@ -297,10 +305,9 @@ def score_all_pending(
     and the run continues -- a content-based refusal is data about that trial,
     not a bug, and shouldn't take the rest of the batch down with it. Any
     other exception still propagates and halts the run. A refused trial's
-    ``judge_scores`` stays ``None``, so it remains eligible for a retry on a
-    later run rather than being permanently skipped -- and if that retry
-    succeeds, ``excluded``/``exclusion_reason`` are reset back to their
-    not-excluded state rather than left stale alongside a real score.
+    ``judge_scores`` stays ``None``; a deliberate retry that succeeds resets
+    ``excluded``/``exclusion_reason`` rather than leaving stale exclusion
+    metadata alongside a real score.
     """
     path = Path(trials_path)
     records = _read_all_records(path)
@@ -311,7 +318,13 @@ def score_all_pending(
     since_last_write = 0
     try:
         for record in records:
+            if model_name is not None and record.get("model_name") != model_name:
+                n_skipped += 1
+                continue
             if record.get("judge_scores") is not None:
+                n_skipped += 1
+                continue
+            if record.get("excluded", False) and not retry_refusals:
                 n_skipped += 1
                 continue
             try:
@@ -610,6 +623,10 @@ def main() -> None:
     invocation after a human has actually read the validation sample, never
     bundled into the default scoring flow.
     """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     import anthropic
     import pandas as pd
     import yaml
@@ -621,6 +638,21 @@ def main() -> None:
     parser.add_argument("--sampled-features", default="data/results/sampled_features.csv")
     parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
     parser.add_argument("--grounding-path", default=DEFAULT_GROUNDING_PATH)
+    parser.add_argument(
+        "--score-model-name",
+        default=None,
+        help="restrict score to one experimental model; use this for a second model in a shared trials file",
+    )
+    parser.add_argument(
+        "--retry-refusals",
+        action="store_true",
+        help="retry records already excluded after a judge refusal; disabled by default",
+    )
+    parser.add_argument(
+        "--scoring-provenance-path",
+        default=DEFAULT_SCORING_PROVENANCE_PATH,
+        help="where the score step writes provenance; use a model-specific path to preserve prior runs",
+    )
     parser.add_argument("--validation-sample-path", default=DEFAULT_VALIDATION_SAMPLE_PATH)
     parser.add_argument("--validation-sample-size", type=int, default=15)
     parser.add_argument(
@@ -705,8 +737,20 @@ def main() -> None:
 
     if "score" in steps:
         judge_client = anthropic.Anthropic()
-        result = score_all_pending(args.trials_path, judge_client, grounding, model=model)
-        save_scoring_provenance(model, result, trials_path=args.trials_path)
+        result = score_all_pending(
+            args.trials_path,
+            judge_client,
+            grounding,
+            model=model,
+            model_name=args.score_model_name,
+            retry_refusals=args.retry_refusals,
+        )
+        save_scoring_provenance(
+            model,
+            result,
+            trials_path=args.trials_path,
+            output_path=args.scoring_provenance_path,
+        )
         print(f"score_all_pending: {result}")
 
     if "validate" in steps:

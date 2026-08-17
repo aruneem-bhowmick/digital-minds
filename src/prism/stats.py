@@ -94,6 +94,7 @@ def build_analysis_table(
     *,
     audit_paths: dict[str, "str | Path"],
     validation_flag_path: "str | Path | list[str | Path]" = DEFAULT_VALIDATION_FLAG_PATH,
+    model_name: str | None = None,
 ) -> pd.DataFrame:
     """Join every non-excluded trial onto its feature's audit row.
 
@@ -105,7 +106,7 @@ def build_analysis_table(
     ``trial_id`` stays, so a row can always be traced back to its full
     transcript in ``trials_path`` if needed.
 
-    ``audit_paths`` maps each model_name present in ``trials_path`` to that
+    ``audit_paths`` maps each model_name present in the selected trials to that
     model's own audit CSV (REQ-11): ``feature_id`` is indexed 0..N-1
     independently per SAE checkpoint, so two different models' dictionaries
     can share the same ``feature_id`` values without meaning the same
@@ -113,7 +114,9 @@ def build_analysis_table(
     ``feature_id`` alone, and there is no single sensible default audit
     table once more than one model's trials can appear in the same file.
 
-    Raises ``JudgeNotValidatedError`` before touching a row of data if any
+    When ``model_name`` is supplied, only that model's records are selected;
+    this supports a reproducible per-model analysis after models share one
+    trial ledger. Raises ``JudgeNotValidatedError`` before touching a row of data if any
     path in ``validation_flag_path`` is missing, and ``ValueError`` if a
     non-excluded trial has no judge score yet, or if a trial's
     ``(model_name, feature_id)`` has no match in ``audit_paths`` -- both
@@ -123,6 +126,10 @@ def build_analysis_table(
     _require_judge_validated(validation_flag_path)
 
     records = _read_trials(trials_path)
+    if model_name is not None:
+        records = [record for record in records if record.get("model_name") == model_name]
+        if not records:
+            raise ValueError(f"{trials_path} has no trials for model_name={model_name!r}")
     trials = pd.DataFrame.from_records(records)
 
     excluded = trials["excluded"]
@@ -366,6 +373,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
     parser.add_argument(
+        "--model-name",
+        default=None,
+        help="restrict analysis to one experimental model in a shared trials file",
+    )
+    parser.add_argument(
         "--audit-path",
         action="append",
         default=[],
@@ -391,7 +403,10 @@ def main() -> None:
     validation_flag_paths = args.validation_flag_path or [DEFAULT_VALIDATION_FLAG_PATH]
 
     table = build_analysis_table(
-        args.trials_path, audit_paths=audit_paths, validation_flag_path=validation_flag_paths
+        args.trials_path,
+        audit_paths=audit_paths,
+        validation_flag_path=validation_flag_paths,
+        model_name=args.model_name,
     )
     analysis_table_path = Path(args.analysis_table_path)
     analysis_table_path.parent.mkdir(parents=True, exist_ok=True)
