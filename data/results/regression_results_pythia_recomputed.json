@@ -1,0 +1,60 @@
+{
+  "n_trials": 474,
+  "n_detections": 1,
+  "covariates": [
+    "identifiability_score",
+    "decoder_norm",
+    "activation_frequency",
+    "strength"
+  ],
+  "standardization": {
+    "identifiability_score": {
+      "mean": 0.8357219638065762,
+      "std": 0.09852731170445536
+    },
+    "decoder_norm": {
+      "mean": 0.7726794006329115,
+      "std": 0.223435704944897
+    },
+    "activation_frequency": {
+      "mean": 0.0031029062027848097,
+      "std": 0.0024211383555612577
+    },
+    "strength": {
+      "mean": 3.7552742616033754,
+      "std": 2.671782466678967
+    }
+  },
+  "converged": true,
+  "convergence_note": "",
+  "coefficients": {
+    "const": {
+      "estimate": -11.564161358333044,
+      "ci_low": -33.35124298499687,
+      "ci_high": 10.222920268330787
+    },
+    "identifiability_score": {
+      "estimate": 0.5047850438898086,
+      "ci_low": -1.189856938258453,
+      "ci_high": 2.19942702603807
+    },
+    "decoder_norm": {
+      "estimate": -0.9641155805278008,
+      "ci_low": -3.9449200902710384,
+      "ci_high": 2.0166889292154364
+    },
+    "activation_frequency": {
+      "estimate": -5.532919293493769,
+      "ci_low": -24.808326596730975,
+      "ci_high": 13.742488009743436
+    },
+    "strength": {
+      "estimate": 0.09082533348462869,
+      "ci_low": -1.8283564762664917,
+      "ci_high": 2.010007143235749
+    }
+  },
+  "trials_path": "data/trials/trials.jsonl",
+  "git_commit": "e8623da1ba54992cb7ed7b1dc7ef341841e8aca5",
+  "timestamp": "2026-08-17T01:01:40.412910+00:00"
+}
