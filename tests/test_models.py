@@ -105,9 +105,6 @@ def test_config_has_no_remaining_model_or_sae_todos() -> None:
 
 
 def test_gemma_config_has_no_remaining_model_or_sae_todos() -> None:
-    # injection.strengths/features.n_total/sampling.seeds stay TODO pending
-    # REQ-11's calibration pilot -- only the model/SAE loading fields, which
-    # are already resolved, get checked here.
     with open(GEMMA_CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -124,6 +121,19 @@ def test_gemma_config_has_no_remaining_model_or_sae_todos() -> None:
         "hook_name",
     ):
         assert config["sae"][field] != "TODO"
+
+
+def test_gemma_config_has_no_remaining_trial_scope_todos() -> None:
+    # REQ-11 Step 4 (calibration pilot) and Step 5 (real measured throughput
+    # + a confirmed trial-scope decision) resolved every field this config
+    # left as TODO -- unlike configs/experiment.yaml's own injection.layer,
+    # which stays TODO for real (REQ-10 is genuinely unresolved for Pythia).
+    with open(GEMMA_CONFIG_PATH, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    assert config["injection"]["strengths"] != "TODO"
+    assert config["features"]["n_total"] != "TODO"
+    assert config["sampling"]["seeds"] != "TODO"
 
 
 def test_load_model_and_sae_rejects_an_unrecognized_loader() -> None:

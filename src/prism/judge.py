@@ -276,8 +276,16 @@ def score_all_pending(
     grounding: dict[str, list[dict[str, Any]]] | None = None,
     *,
     model: str = DEFAULT_JUDGE_MODEL,
+    model_name: str | None = None,
+    retry_refusals: bool = False,
 ) -> dict[str, int]:
-    """Score every trial in ``trials_path`` currently missing ``judge_scores`` (REQ-8).
+    """Score pending trials in ``trials_path`` (REQ-8).
+
+    ``model_name`` limits scoring to one experimental model, preventing a
+    second model's judge pass from silently revisiting records in a shared
+    trial file. Refused records are skipped by default even though their
+    ``judge_scores`` is intentionally null; retrying them requires the
+    explicit ``retry_refusals=True`` opt-in.
 
     Fills in ``judge_scores`` on the existing line for each pending trial --
     ADR-0005's append-only convention governs *new* trials, not a
@@ -297,10 +305,9 @@ def score_all_pending(
     and the run continues -- a content-based refusal is data about that trial,
     not a bug, and shouldn't take the rest of the batch down with it. Any
     other exception still propagates and halts the run. A refused trial's
-    ``judge_scores`` stays ``None``, so it remains eligible for a retry on a
-    later run rather than being permanently skipped -- and if that retry
-    succeeds, ``excluded``/``exclusion_reason`` are reset back to their
-    not-excluded state rather than left stale alongside a real score.
+    ``judge_scores`` stays ``None``; a deliberate retry that succeeds resets
+    ``excluded``/``exclusion_reason`` rather than leaving stale exclusion
+    metadata alongside a real score.
     """
     path = Path(trials_path)
     records = _read_all_records(path)
@@ -311,7 +318,13 @@ def score_all_pending(
     since_last_write = 0
     try:
         for record in records:
+            if model_name is not None and record.get("model_name") != model_name:
+                n_skipped += 1
+                continue
             if record.get("judge_scores") is not None:
+                n_skipped += 1
+                continue
+            if record.get("excluded", False) and not retry_refusals:
                 n_skipped += 1
                 continue
             try:
@@ -471,6 +484,7 @@ def validate_judge_subsample(
     *,
     seed: int = 0,
     output_path: "str | Path | None" = DEFAULT_VALIDATION_SAMPLE_PATH,
+    model_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Sample ``n`` scored trials and pair each with its judge grade for human
     review (REQ-8).
@@ -480,11 +494,24 @@ def validate_judge_subsample(
     a gate: it never writes ``judge_validated.flag`` itself -- see
     ``write_validation_flag()`` for the function that does, which only runs
     on an explicit human confirmation.
+
+    ``model_name``, when given, restricts the pool to one model's trials
+    before sampling (REQ-11): once ``trials_path`` holds more than one
+    model's trials, an unfiltered sample is drawn proportionally to each
+    model's share of the file, which mostly re-samples whichever model has
+    already been validated rather than the model a caller actually wants to
+    review.
     """
     records = _read_all_records(trials_path)
     scored = [r for r in records if r.get("judge_scores") is not None]
+    if model_name is not None:
+        scored = [r for r in scored if r.get("model_name") == model_name]
     if not scored:
-        raise ValueError(f"{trials_path} has no scored trials yet -- run score_all_pending() first")
+        raise ValueError(
+            f"{trials_path} has no scored trials yet"
+            + (f" for model_name={model_name!r}" if model_name is not None else "")
+            + " -- run score_all_pending() first"
+        )
 
     rng = random.Random(seed)
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -596,6 +623,10 @@ def main() -> None:
     invocation after a human has actually read the validation sample, never
     bundled into the default scoring flow.
     """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     import anthropic
     import pandas as pd
     import yaml
@@ -607,8 +638,31 @@ def main() -> None:
     parser.add_argument("--sampled-features", default="data/results/sampled_features.csv")
     parser.add_argument("--trials-path", default=DEFAULT_TRIALS_PATH)
     parser.add_argument("--grounding-path", default=DEFAULT_GROUNDING_PATH)
+    parser.add_argument(
+        "--score-model-name",
+        default=None,
+        help="restrict score to one experimental model; use this for a second model in a shared trials file",
+    )
+    parser.add_argument(
+        "--retry-refusals",
+        action="store_true",
+        help="retry records already excluded after a judge refusal; disabled by default",
+    )
+    parser.add_argument(
+        "--scoring-provenance-path",
+        default=DEFAULT_SCORING_PROVENANCE_PATH,
+        help="where the score step writes provenance; use a model-specific path to preserve prior runs",
+    )
     parser.add_argument("--validation-sample-path", default=DEFAULT_VALIDATION_SAMPLE_PATH)
     parser.add_argument("--validation-sample-size", type=int, default=15)
+    parser.add_argument(
+        "--validate-model-name",
+        default=None,
+        help="restrict the validate step's sample to one model's trials (REQ-11); with "
+        "trials from more than one model in --trials-path, an unfiltered sample is drawn "
+        "proportionally to each model's share of the file and mostly re-samples whichever "
+        "model was already validated",
+    )
     parser.add_argument(
         "--steps", default="grounding,score,validate", help="comma-separated subset of: grounding, score, validate"
     )
@@ -616,7 +670,15 @@ def main() -> None:
         "--confirm-validated",
         default=None,
         metavar="NOTE",
-        help="write data/results/judge_validated.flag with this reviewer note, and do nothing else",
+        help="write a judge_validated flag with this reviewer note, and do nothing else",
+    )
+    parser.add_argument(
+        "--flag-output-path",
+        default=DEFAULT_VALIDATION_FLAG_PATH,
+        help="where --confirm-validated writes its flag; defaults to Pythia's own "
+        "data/results/judge_validated.flag -- pass a model-specific path (e.g. "
+        "judge_validated_gemma.flag) so a second model's confirmation doesn't overwrite "
+        "the first model's",
     )
     parser.add_argument(
         "--device",
@@ -636,12 +698,15 @@ def main() -> None:
             sample_size = _count_report_trials(report_path)
         else:
             records = _read_all_records(args.trials_path)
-            n_scored = sum(1 for r in records if r.get("judge_scores") is not None)
-            sample_size = min(args.validation_sample_size, n_scored)
+            scored = [r for r in records if r.get("judge_scores") is not None]
+            if args.validate_model_name is not None:
+                scored = [r for r in scored if r.get("model_name") == args.validate_model_name]
+            sample_size = min(args.validation_sample_size, len(scored))
         path = write_validation_flag(
             args.confirm_validated,
             trials_path=args.trials_path,
             sample_size=sample_size,
+            output_path=args.flag_output_path,
         )
         print(f"wrote {path}")
         return
@@ -672,13 +737,28 @@ def main() -> None:
 
     if "score" in steps:
         judge_client = anthropic.Anthropic()
-        result = score_all_pending(args.trials_path, judge_client, grounding, model=model)
-        save_scoring_provenance(model, result, trials_path=args.trials_path)
+        result = score_all_pending(
+            args.trials_path,
+            judge_client,
+            grounding,
+            model=model,
+            model_name=args.score_model_name,
+            retry_refusals=args.retry_refusals,
+        )
+        save_scoring_provenance(
+            model,
+            result,
+            trials_path=args.trials_path,
+            output_path=args.scoring_provenance_path,
+        )
         print(f"score_all_pending: {result}")
 
     if "validate" in steps:
         validate_judge_subsample(
-            args.validation_sample_size, args.trials_path, output_path=args.validation_sample_path
+            args.validation_sample_size,
+            args.trials_path,
+            output_path=args.validation_sample_path,
+            model_name=args.validate_model_name,
         )
 
 

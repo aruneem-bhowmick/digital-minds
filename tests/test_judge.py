@@ -370,12 +370,43 @@ def test_score_all_pending_clears_stale_exclusion_on_a_successful_retry(tmp_path
     _write_all_records(path, [previously_refused])
     client = _FakeJudgeClient([_CONTROL_SCORE])
 
-    score_all_pending(path, client)
+    score_all_pending(path, client, retry_refusals=True)
 
     record = _read_all_records(path)[0]
     assert record["judge_scores"] == _CONTROL_SCORE
     assert record["excluded"] is False
     assert record["exclusion_reason"] is None
+
+
+def test_score_all_pending_skips_previously_excluded_refusal_by_default(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    previously_refused = {
+        **_control_trial(),
+        "excluded": True,
+        "exclusion_reason": "judge refused to grade trial '...' (category='bio')",
+    }
+    _write_all_records(path, [previously_refused])
+
+    result = score_all_pending(path, _FakeJudgeClient([]))
+
+    assert result == {"scored": 0, "skipped": 1, "refused": 0}
+    record = _read_all_records(path)[0]
+    assert record["judge_scores"] is None
+    assert record["excluded"] is True
+
+
+def test_score_all_pending_scopes_records_to_the_requested_model(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    pythia = {**_control_trial(question_id="pythia"), "model_name": "pythia"}
+    gemma = {**_control_trial(question_id="gemma"), "model_name": "gemma"}
+    _write_all_records(path, [pythia, gemma])
+
+    result = score_all_pending(path, _FakeJudgeClient([_CONTROL_SCORE]), model_name="gemma")
+
+    assert result == {"scored": 1, "skipped": 1, "refused": 0}
+    records = {record["model_name"]: record for record in _read_all_records(path)}
+    assert records["pythia"]["judge_scores"] is None
+    assert records["gemma"]["judge_scores"] == _CONTROL_SCORE
 
 
 def test_score_all_pending_flushes_progress_on_finally_even_mid_batch(tmp_path) -> None:
@@ -571,6 +602,50 @@ def test_validate_judge_subsample_writes_a_report_file(tmp_path) -> None:
     content = report_path.read_text(encoding="utf-8")
     assert scored["trial_id"] in content
     assert "Agreement notes" in content
+
+
+# --- validate_judge_subsample: model_name filter (REQ-11) --------------------
+
+
+def test_validate_judge_subsample_restricts_to_one_model_when_given(tmp_path) -> None:
+    # Without a model_name filter, an unfiltered sample drawn from a file
+    # holding both models' trials mostly re-samples whichever model has the
+    # larger share of scored rows -- here Pythia (9 rows) outweighs Gemma
+    # (1 row) heavily, so an unfiltered n=1 sample would almost always land
+    # on Pythia. The filter must guarantee the Gemma row regardless.
+    path = tmp_path / "trials.jsonl"
+    records = [
+        {**_control_trial(question_id=str(i)), "judge_scores": _CONTROL_SCORE, "model_name": "EleutherAI/pythia-70m-deduped"}
+        for i in range(9)
+    ] + [{**_control_trial(question_id="gemma"), "judge_scores": _CONTROL_SCORE, "model_name": "google/gemma-2-2b"}]
+    _write_all_records(path, records)
+
+    sample = validate_judge_subsample(1, path, output_path=None, model_name="google/gemma-2-2b")
+
+    assert len(sample) == 1
+    assert sample[0]["model_name"] == "google/gemma-2-2b"
+
+
+def test_validate_judge_subsample_raises_when_the_filtered_model_has_no_scored_trials(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    scored = {**_control_trial(), "judge_scores": _CONTROL_SCORE, "model_name": "EleutherAI/pythia-70m-deduped"}
+    _write_all_records(path, [scored])
+
+    with pytest.raises(ValueError, match=r"no scored trials.*google/gemma-2-2b"):
+        validate_judge_subsample(5, path, output_path=None, model_name="google/gemma-2-2b")
+
+
+def test_validate_judge_subsample_with_no_model_name_pools_every_model(tmp_path) -> None:
+    path = tmp_path / "trials.jsonl"
+    records = [
+        {**_control_trial(question_id="p"), "judge_scores": _CONTROL_SCORE, "model_name": "EleutherAI/pythia-70m-deduped"},
+        {**_control_trial(question_id="g"), "judge_scores": _CONTROL_SCORE, "model_name": "google/gemma-2-2b"},
+    ]
+    _write_all_records(path, records)
+
+    sample = validate_judge_subsample(2, path, output_path=None)
+
+    assert {r["model_name"] for r in sample} == {"EleutherAI/pythia-70m-deduped", "google/gemma-2-2b"}
 
 
 # --- write_validation_flag: the human-confirmation gate ----------------------

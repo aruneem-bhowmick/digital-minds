@@ -1,0 +1,9 @@
+{
+  "judge_model": "claude-opus-4-8",
+  "trials_path": "data/trials/trials.jsonl",
+  "git_commit": "e8623da1ba54992cb7ed7b1dc7ef341841e8aca5",
+  "timestamp": "2026-08-17T01:01:25.621326+00:00",
+  "scored": 210,
+  "skipped": 760,
+  "refused": 0
+}
